@@ -8,7 +8,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, Textar
 use gpui_kit::component::select::{Select, SelectState};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::*;
-use quiet_store::{ProjectId, Repeat, Task, TaskEdit, TaskId, parse_time};
+use quiet_store::{LEAD_DAYS, ProjectId, Repeat, Task, TaskEdit, TaskId, parse_day, parse_time};
 
 use crate::data;
 
@@ -61,6 +61,9 @@ pub struct TaskEditor {
     repeat: Entity<SelectState<Vec<SharedString>>>,
     reminder: Entity<InputState>,
     reminder_error: bool,
+    day: Entity<InputState>,
+    day_error: bool,
+    lead: Entity<SelectState<Vec<SharedString>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -99,7 +102,28 @@ impl TaskEditor {
                 .default_value(task.reminder.map(|t| t.format("%H:%M").to_string()).unwrap_or_default())
         });
 
+        let day = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("No day")
+                .default_value(task.day.map(|d| d.format("%-d %b %Y").to_string()).unwrap_or_default())
+        });
+        let lead_labels: Vec<SharedString> = LEAD_DAYS.iter().map(|&d| lead_label(d).into()).collect();
+        let current = LEAD_DAYS.iter().position(|&d| d == task.lead_days).unwrap_or(0);
+        let lead = cx.new(|cx| SelectState::new(lead_labels, Some(IndexPath::new(current)), window, cx));
+
         let subscriptions = vec![
+            cx.subscribe_in(&day, window, |this, _, event, window, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    if this.save(cx) {
+                        window.close_dialog(cx);
+                    }
+                }
+                InputEvent::Change => {
+                    this.day_error = false;
+                    cx.notify();
+                }
+                _ => {}
+            }),
             cx.subscribe_in(&title, window, |this, _, event, window, cx| {
                 if let InputEvent::PressEnter { .. } = event
                     && this.save(cx)
@@ -131,6 +155,9 @@ impl TaskEditor {
             repeat,
             reminder,
             reminder_error: false,
+            day,
+            day_error: false,
+            lead,
             _subscriptions: subscriptions,
         }
     }
@@ -155,6 +182,19 @@ impl TaskEditor {
                 }
             }
         };
+        let day_text = self.day.read(cx).value().trim().to_string();
+        let day = if day_text.is_empty() {
+            None
+        } else {
+            match parse_day(&day_text, data::today()) {
+                Some(day) => Some(day),
+                None => {
+                    self.day_error = true;
+                    cx.notify();
+                    return false;
+                }
+            }
+        };
         let title = self.title.read(cx).value().trim().to_string();
         let note = self.note.read(cx).value().trim().to_string();
         let edit = TaskEdit {
@@ -163,6 +203,8 @@ impl TaskEditor {
             project_id: Self::selected(&self.project, &self.project_ids, cx).unwrap_or(self.task.project_id),
             repeat: Self::selected(&self.repeat, &self.repeat_options, cx).unwrap_or(self.task.repeat),
             reminder,
+            day,
+            lead_days: Self::selected(&self.lead, LEAD_DAYS, cx).unwrap_or(0),
         };
         let id = self.id;
         data::change(cx, |s| s.update_task(id, &edit, data::today()));
@@ -178,12 +220,31 @@ impl Render for TaskEditor {
         } else {
             "Rings once on days the task is in Today. Setting one puts it in Today."
         };
+        let day_hint = if self.day_error {
+            "Try fri, tomorrow, +3, 14 nov or 2026-11-14."
+        } else {
+            "It comes into Today on its own. Nothing turns red after."
+        };
         v_flex()
             .gap_3()
             .child(Input::new(&self.title).large())
             .child(Textarea::new(&self.note))
             .child(field("Project", Select::new(&self.project).w(px(260.)).into_any_element(), cx))
             .child(field("Repeat", Select::new(&self.repeat).w(px(260.)).into_any_element(), cx))
+            .child(field(
+                "Day",
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().w(px(140.)).child(Input::new(&self.day)))
+                            .child(Select::new(&self.lead).w(px(160.))),
+                    )
+                    .child(div().text_xs().text_color(subtle).child(day_hint))
+                    .into_any_element(),
+                cx,
+            ))
             .child(field(
                 "Reminder",
                 v_flex()
@@ -194,6 +255,15 @@ impl Render for TaskEditor {
                 cx,
             ))
             .child(div().pt_1().text_xs().text_color(subtle).child("Enter saves. Esc closes."))
+    }
+}
+
+fn lead_label(days: i64) -> String {
+    match days {
+        0 => "On the day".into(),
+        1 => "1 day before".into(),
+        7 => "1 week before".into(),
+        n => format!("{n} days before"),
     }
 }
 

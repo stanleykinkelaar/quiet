@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveTime, TimeZone, Weekday};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 pub type TaskId = i64;
@@ -99,6 +99,16 @@ pub struct Task {
     pub today_order: i64,
     /// For the done copy of a repeating task: the task it was made from.
     pub repeat_of: Option<TaskId>,
+    /// In Today since an earlier day and not yet kept or sent back.
+    pub carried: bool,
+    /// The reminder rang (or passed while the PC was off) and nobody has
+    /// reacted yet.
+    pub reminder_open: bool,
+    /// The day this task is for. It comes into Today `lead_days` before.
+    pub day: Option<NaiveDate>,
+    pub lead_days: i64,
+    /// Inbox only: looked at during a sort and kept in the Inbox on purpose.
+    pub reviewed: bool,
 }
 
 impl Task {
@@ -124,14 +134,23 @@ pub struct TaskEdit {
     pub project_id: Option<ProjectId>,
     pub repeat: Repeat,
     pub reminder: Option<NaiveTime>,
+    pub day: Option<NaiveDate>,
+    pub lead_days: i64,
 }
+
+/// A reminder nobody reacted to rings once more, this much later.
+pub const REMIND_AGAIN_AFTER: Duration = Duration::minutes(10);
+
+/// Lead times the editor offers for a task's day, in days.
+pub const LEAD_DAYS: &[i64] = &[0, 1, 2, 7];
 
 pub struct Store {
     conn: Connection,
 }
 
 const TASK_COLUMNS: &str = "id, title, note, project_id, status, in_today, is_next_action, \
-     repeat, reminder, created_at, completed_at, today_order, repeat_of";
+     repeat, reminder, created_at, completed_at, today_order, repeat_of, \
+     carried, reminder_open, day, lead_days, reviewed";
 
 const MIGRATIONS: &[&str] = &[r#"
     CREATE TABLE projects (
@@ -163,6 +182,15 @@ const MIGRATIONS: &[&str] = &[r#"
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );
+"#, r#"
+    ALTER TABLE tasks ADD COLUMN carried       INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tasks ADD COLUMN snooze_at     TEXT;
+    ALTER TABLE tasks ADD COLUMN rings         INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tasks ADD COLUMN reminder_open INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tasks ADD COLUMN day           TEXT;
+    ALTER TABLE tasks ADD COLUMN lead_days     INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tasks ADD COLUMN day_shown     INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE tasks ADD COLUMN reviewed      INTEGER NOT NULL DEFAULT 0;
 "#];
 
 fn read_task(row: &Row) -> rusqlite::Result<Task> {
@@ -183,6 +211,11 @@ fn read_task(row: &Row) -> rusqlite::Result<Task> {
         completed_at: row.get(10)?,
         today_order: row.get(11)?,
         repeat_of: row.get(12)?,
+        carried: row.get(13)?,
+        reminder_open: row.get(14)?,
+        day: row.get::<_, Option<String>>(15)?.and_then(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok()),
+        lead_days: row.get(16)?,
+        reviewed: row.get(17)?,
     })
 }
 
@@ -192,6 +225,95 @@ fn read_project(row: &Row) -> rusqlite::Result<Project> {
 
 fn day_key(day: NaiveDate) -> String {
     day.format("%Y-%m-%d").to_string()
+}
+
+/// Local date and time as stored for snoozes, sortable as text.
+fn moment_key(at: NaiveDateTime) -> String {
+    at.format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+fn parse_moment(text: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S").ok()
+}
+
+/// Reads a day the way people type it, relative to `today`: "today",
+/// "tomorrow", a weekday ("fri", "friday", the next one, today included),
+/// "+3" or "3d" or "in 3 days", "2w", "14 nov", "nov 14", "14-11", "14/11"
+/// or "2026-11-14". A day and month without a year that has already
+/// passed means next year.
+pub fn parse_day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let text = text.trim().to_lowercase();
+    let text = text.strip_prefix("in ").unwrap_or(&text).trim();
+    match text {
+        "" => return None,
+        "today" | "tod" => return Some(today),
+        "tomorrow" | "tom" | "tmr" => return today.succ_opt(),
+        _ => {}
+    }
+    if let Some(day) = weekday_from(text) {
+        let ahead = (7 + day.num_days_from_monday() - today.weekday().num_days_from_monday()) % 7;
+        return today.checked_add_days(chrono::Days::new(ahead.into()));
+    }
+    // Offsets: "+3", "3d", "3 days", "2w", "2 weeks".
+    let offset = text.trim_start_matches('+');
+    let digits: String = offset.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if !digits.is_empty() {
+        let unit = offset[digits.len()..].trim();
+        let n: u64 = digits.parse().ok()?;
+        let days = match unit {
+            "" if text.starts_with('+') => Some(n),
+            "d" | "day" | "days" => Some(n),
+            "w" | "wk" | "week" | "weeks" => Some(n * 7),
+            _ => None,
+        };
+        if let Some(days) = days {
+            return today.checked_add_days(chrono::Days::new(days));
+        }
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+        return Some(date);
+    }
+    // Day and month, in either order, with any separator.
+    let parts: Vec<&str> =
+        text.split([' ', '-', '/', '.']).filter(|p| !p.is_empty()).collect();
+    let (day, month, year) = match parts.as_slice() {
+        [a, b] | [a, b, _] => {
+            let year = parts.get(2).and_then(|y| y.parse::<i32>().ok());
+            match (a.parse::<u32>(), b.parse::<u32>(), month_from(a), month_from(b)) {
+                (Ok(d), Ok(m), _, _) => (d, m, year),
+                (Ok(d), Err(_), _, Some(m)) => (d, m, year),
+                (Err(_), Ok(d), Some(m), _) => (d, m, year),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    if let Some(year) = year {
+        let year = if year < 100 { 2000 + year } else { year };
+        return NaiveDate::from_ymd_opt(year, month, day);
+    }
+    let this_year = NaiveDate::from_ymd_opt(today.year(), month, day)?;
+    if this_year >= today { Some(this_year) } else { NaiveDate::from_ymd_opt(today.year() + 1, month, day) }
+}
+
+fn weekday_from(text: &str) -> Option<Weekday> {
+    if text.len() < 3 {
+        return None;
+    }
+    [Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri, Weekday::Sat, Weekday::Sun]
+        .into_iter()
+        .find(|&d| weekday_name(d).to_lowercase().starts_with(text))
+}
+
+fn month_from(text: &str) -> Option<u32> {
+    const MONTHS: [&str; 12] = [
+        "january", "february", "march", "april", "may", "june", "july", "august", "september", "october",
+        "november", "december",
+    ];
+    if text.len() < 3 {
+        return None;
+    }
+    MONTHS.iter().position(|m| m.starts_with(text)).map(|i| i as u32 + 1)
 }
 
 /// Unix seconds of local midnight at the start of `day`.
@@ -244,6 +366,11 @@ pub fn parse_time(text: &str) -> Option<NaiveTime> {
 
 pub fn now() -> i64 {
     Local::now().timestamp()
+}
+
+/// Whether a task for `day` belongs in Today by `today`, given its lead time.
+pub fn day_arrives(day: NaiveDate, lead_days: i64, today: NaiveDate) -> bool {
+    day - Duration::days(lead_days.max(0)) <= today
 }
 
 impl Store {
@@ -312,7 +439,7 @@ impl Store {
     /// Open tasks chosen for today, in the user's order.
     pub fn today(&self) -> Result<Vec<Task>> {
         self.query_tasks(
-            "WHERE status = 'open' AND in_today = 1 ORDER BY today_order, id",
+            "WHERE status = 'open' AND in_today = 1 ORDER BY carried, today_order, id",
             [],
         )
     }
@@ -368,6 +495,27 @@ impl Store {
         )
     }
 
+    /// Inbox tasks waiting for a decision: not in Today, oldest first, the
+    /// ones never looked at before the ones kept on purpose.
+    pub fn inbox_to_sort(&self) -> Result<Vec<Task>> {
+        self.query_tasks(
+            "WHERE status = 'open' AND project_id IS NULL AND in_today = 0
+             ORDER BY reviewed, created_at, id",
+            [],
+        )
+    }
+
+    /// How many Inbox tasks nobody has looked at yet.
+    pub fn inbox_unsorted_count(&self) -> Result<usize> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE status = 'open' AND project_id IS NULL AND in_today = 0 AND reviewed = 0",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
     /// Open tasks of a project, the next action first.
     pub fn project_tasks(&self, project: ProjectId) -> Result<Vec<Task>> {
         self.query_tasks(
@@ -402,9 +550,14 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let moved_project = before.project_id != edit.project_id;
         tx.execute(
-            "UPDATE tasks SET title = ?2, note = ?3, project_id = ?4, repeat = ?5, reminder = ?6,
+            "UPDATE tasks SET title = ?2, note = ?3, project_id = ?4, repeat = ?5,
                  is_next_action = CASE WHEN ?7 THEN 0 ELSE is_next_action END,
-                 reminded_on = CASE WHEN reminder IS ?6 THEN reminded_on ELSE NULL END
+                 reminded_on = CASE WHEN reminder IS ?6 THEN reminded_on ELSE NULL END,
+                 snooze_at = CASE WHEN reminder IS ?6 THEN snooze_at ELSE NULL END,
+                 rings = CASE WHEN reminder IS ?6 THEN rings ELSE 0 END,
+                 reminder_open = CASE WHEN reminder IS ?6 THEN reminder_open ELSE 0 END,
+                 day_shown = CASE WHEN day IS ?8 AND lead_days = ?9 THEN day_shown ELSE 0 END,
+                 reminder = ?6, day = ?8, lead_days = ?9
              WHERE id = ?1",
             params![
                 id,
@@ -414,6 +567,8 @@ impl Store {
                 edit.repeat.to_db(),
                 edit.reminder.map(|t| t.format("%H:%M").to_string()),
                 moved_project,
+                edit.day.map(day_key),
+                edit.lead_days.max(0),
             ],
         )?;
         tx.commit()?;
@@ -421,8 +576,13 @@ impl Store {
         // rings for tasks in Today, so setting one brings the task in.
         let newly_repeating = before.repeat != edit.repeat && edit.repeat.matches(today);
         let new_reminder = edit.reminder.is_some() && before.reminder != edit.reminder;
-        if !before.is_done() && !before.in_today && (newly_repeating || new_reminder) {
+        let day_arrived = (before.day != edit.day || before.lead_days != edit.lead_days)
+            && edit.day.is_some_and(|day| day_arrives(day, edit.lead_days, today));
+        if !before.is_done() && !before.in_today && (newly_repeating || new_reminder || day_arrived) {
             self.set_in_today(id, true)?;
+        }
+        if day_arrived {
+            self.conn.execute("UPDATE tasks SET day_shown = 1 WHERE id = ?1", [id])?;
         }
         Ok(())
     }
@@ -430,9 +590,47 @@ impl Store {
     pub fn set_in_today(&self, id: TaskId, in_today: bool) -> Result<()> {
         let order = if in_today { self.next_today_order()? } else { 0 };
         self.conn.execute(
-            "UPDATE tasks SET in_today = ?2, today_order = ?3 WHERE id = ?1 AND in_today != ?2",
+            "UPDATE tasks SET in_today = ?2, today_order = ?3, carried = 0,
+                 snooze_at = CASE WHEN ?2 THEN snooze_at ELSE NULL END,
+                 reminder_open = CASE WHEN ?2 THEN reminder_open ELSE 0 END
+             WHERE id = ?1 AND in_today != ?2",
             params![id, in_today, order],
         )?;
+        Ok(())
+    }
+
+    /// Keeps a task that came along from an earlier day in Today, at the
+    /// end of today's list.
+    pub fn keep_carried(&self, id: TaskId) -> Result<()> {
+        let order = self.next_today_order()?;
+        self.conn.execute(
+            "UPDATE tasks SET carried = 0, today_order = ?2 WHERE id = ?1 AND carried = 1",
+            params![id, order],
+        )?;
+        Ok(())
+    }
+
+    /// Keeps every task from earlier days, or sends them all back.
+    pub fn settle_carried(&self, keep: bool) -> Result<()> {
+        let ids: Vec<TaskId> = self.today()?.into_iter().filter(|t| t.carried).map(|t| t.id).collect();
+        for id in ids {
+            if keep { self.keep_carried(id)? } else { self.set_in_today(id, false)? }
+        }
+        Ok(())
+    }
+
+    /// Inbox sorting: moves a task into a project.
+    pub fn move_to_project(&self, id: TaskId, project: ProjectId) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET project_id = ?2, is_next_action = 0, reviewed = 1 WHERE id = ?1",
+            params![id, project],
+        )?;
+        Ok(())
+    }
+
+    /// Inbox sorting: looked at, and left in the Inbox on purpose.
+    pub fn mark_reviewed(&self, id: TaskId) -> Result<()> {
+        self.conn.execute("UPDATE tasks SET reviewed = 1 WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -474,7 +672,9 @@ impl Store {
         }
         if task.repeat == Repeat::Never {
             self.conn.execute(
-                "UPDATE tasks SET status = 'done', completed_at = ?2, is_next_action = 0 WHERE id = ?1",
+                "UPDATE tasks SET status = 'done', completed_at = ?2, is_next_action = 0,
+                     carried = 0, snooze_at = NULL, reminder_open = 0
+                 WHERE id = ?1",
                 params![id, at],
             )?;
         } else {
@@ -484,7 +684,10 @@ impl Store {
                  SELECT title, note, project_id, 'done', 0, created_at, ?2, id FROM tasks WHERE id = ?1",
                 params![id, at],
             )?;
-            tx.execute("UPDATE tasks SET in_today = 0 WHERE id = ?1", [id])?;
+            tx.execute(
+                "UPDATE tasks SET in_today = 0, carried = 0, snooze_at = NULL, reminder_open = 0 WHERE id = ?1",
+                [id],
+            )?;
             tx.commit()?;
         }
         Ok(())
@@ -525,7 +728,10 @@ impl Store {
             _ => None,
         };
         self.conn.execute(
-            &format!("INSERT OR REPLACE INTO tasks ({TASK_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+            &format!(
+                "INSERT OR REPLACE INTO tasks ({TASK_COLUMNS})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"
+            ),
             params![
                 task.id,
                 task.title,
@@ -540,6 +746,11 @@ impl Store {
                 task.completed_at,
                 task.today_order,
                 task.repeat_of,
+                task.carried,
+                task.reminder_open,
+                task.day.map(day_key),
+                task.lead_days,
+                task.reviewed,
             ],
         )?;
         Ok(())
@@ -548,9 +759,10 @@ impl Store {
     // ---- the day --------------------------------------------------------
 
     /// Runs once per calendar day, on the first launch (or first check) of
-    /// that day. Unfinished Today tasks quietly go back where they came from
-    /// (their project or the Inbox), and repeating tasks for `today` are put
-    /// into Today. Returns whether anything ran.
+    /// that day. Unfinished Today tasks stay, marked as carried from an
+    /// earlier day so you can keep them or send them back. Repeating tasks
+    /// for `today`, and tasks whose day has arrived, come into Today.
+    /// Returns whether anything ran.
     pub fn start_day(&self, today: NaiveDate) -> Result<bool> {
         let key = day_key(today);
         match self.setting("last_day")? {
@@ -563,23 +775,45 @@ impl Store {
             Some(_) => {}
         }
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute("UPDATE tasks SET in_today = 0, today_order = 0 WHERE in_today = 1", [])?;
-        let repeating: Vec<(TaskId, String)> = {
+        tx.execute("UPDATE tasks SET snooze_at = NULL, rings = 0, reminder_open = 0", [])?;
+        tx.execute("UPDATE tasks SET in_today = 0, today_order = 0, carried = 0 WHERE in_today = 1 AND status = 'done'", [])?;
+        tx.execute("UPDATE tasks SET carried = 1 WHERE in_today = 1 AND status = 'open'", [])?;
+
+        let mut arriving: Vec<TaskId> = Vec::new();
+        {
             let mut stmt = tx.prepare(
-                "SELECT id, repeat FROM tasks WHERE status = 'open' AND repeat != '' ORDER BY created_at, id",
+                "SELECT id, repeat, day, lead_days, day_shown FROM tasks WHERE status = 'open'
+                   AND (repeat != '' OR day IS NOT NULL) ORDER BY created_at, id",
             )?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        let mut order = 0;
-        for (id, rule) in repeating {
-            if Repeat::from_db(&rule).matches(today) {
-                order += 1;
-                tx.execute(
-                    "UPDATE tasks SET in_today = 1, today_order = ?2 WHERE id = ?1",
-                    params![id, order],
-                )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, TaskId>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, bool>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (id, rule, day, lead, shown) = row?;
+                let repeats_today = Repeat::from_db(&rule).matches(today);
+                let day_arrived = !shown
+                    && day
+                        .and_then(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok())
+                        .is_some_and(|d| day_arrives(d, lead, today));
+                if repeats_today || day_arrived {
+                    arriving.push(id);
+                }
+                if day_arrived {
+                    tx.execute("UPDATE tasks SET day_shown = 1 WHERE id = ?1", [id])?;
+                }
             }
+        }
+        for (order, id) in arriving.into_iter().enumerate() {
+            tx.execute(
+                "UPDATE tasks SET in_today = 1, carried = 0, today_order = ?2 WHERE id = ?1",
+                params![id, order as i64 + 1],
+            )?;
         }
         tx.execute(
             "INSERT INTO settings (key, value) VALUES ('last_day', ?1)
@@ -591,37 +825,63 @@ impl Store {
     }
 
     /// Reminders that should ring now: open Today tasks whose reminder time
-    /// has passed today and has not rung yet. Reminders more than `grace`
-    /// late (for example because the PC was off) are dropped silently
-    /// rather than shown late. Every returned or dropped reminder is marked
-    /// as handled for `today`.
-    pub fn take_due_reminders(
-        &self,
-        today: NaiveDate,
-        now: NaiveTime,
-        grace: chrono::Duration,
-    ) -> Result<Vec<Task>> {
+    /// has passed today and has not rung yet, and snoozed ones whose time
+    /// has come. A reminder nobody reacts to rings once more after
+    /// `REMIND_AGAIN_AFTER`. One more than `grace` late (the PC was asleep
+    /// or off) does not ring at all; the task shows it was missed instead.
+    pub fn take_due_reminders(&self, now: NaiveDateTime, grace: Duration) -> Result<Vec<Task>> {
+        let today = now.date();
         let key = day_key(today);
-        let candidates = self.query_tasks(
-            "WHERE status = 'open' AND in_today = 1 AND reminder IS NOT NULL
-               AND (reminded_on IS NULL OR reminded_on != ?1)",
-            [&key],
-        )?;
+        let candidates: Vec<(TaskId, Option<String>, Option<String>, i64)> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT id, reminded_on, snooze_at, rings FROM tasks
+                 WHERE status = 'open' AND in_today = 1 AND reminder IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
         let mut due = Vec::new();
-        for task in candidates {
+        for (id, reminded_on, snooze_at, rings) in candidates {
+            let Some(task) = self.task(id)? else { continue };
             let Some(at) = task.reminder else { continue };
-            if at > now {
+            let first = reminded_on.as_deref() != Some(key.as_str()) && at <= now.time();
+            let snoozed = snooze_at.as_deref().and_then(parse_moment).filter(|s| *s <= now);
+            let ring_at = match (first, snoozed) {
+                (true, _) => today.and_time(at),
+                (false, Some(at)) => at,
+                (false, None) => continue,
+            };
+            if now - ring_at > grace {
+                self.conn.execute(
+                    "UPDATE tasks SET reminded_on = ?2, snooze_at = NULL, reminder_open = 1 WHERE id = ?1",
+                    params![id, key],
+                )?;
                 continue;
             }
+            let rings = if first { 1 } else { rings + 1 };
+            let again = (rings == 1).then(|| moment_key(now + REMIND_AGAIN_AFTER));
             self.conn.execute(
-                "UPDATE tasks SET reminded_on = ?2 WHERE id = ?1",
-                params![task.id, key],
+                "UPDATE tasks SET reminded_on = ?2, rings = ?3, snooze_at = ?4, reminder_open = 1 WHERE id = ?1",
+                params![id, key, rings, again],
             )?;
-            if now - at <= grace {
-                due.push(task);
-            }
+            due.push(task);
         }
         Ok(due)
+    }
+
+    /// Rings the reminder again at `until`.
+    pub fn snooze(&self, id: TaskId, until: NaiveDateTime) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET snooze_at = ?2, reminder_open = 0 WHERE id = ?1",
+            params![id, moment_key(until)],
+        )?;
+        Ok(())
+    }
+
+    /// The reminder was seen: no second ring, no missed mark.
+    pub fn acknowledge_reminder(&self, id: TaskId) -> Result<()> {
+        self.conn.execute("UPDATE tasks SET snooze_at = NULL, reminder_open = 0 WHERE id = ?1", [id])?;
+        Ok(())
     }
 
     // ---- projects -------------------------------------------------------
@@ -690,7 +950,19 @@ mod tests {
 
     fn edit(store: &Store, id: TaskId) -> TaskEdit {
         let t = store.task(id).unwrap().unwrap();
-        TaskEdit { title: t.title, note: t.note, project_id: t.project_id, repeat: t.repeat, reminder: t.reminder }
+        TaskEdit {
+            title: t.title,
+            note: t.note,
+            project_id: t.project_id,
+            repeat: t.repeat,
+            reminder: t.reminder,
+            day: t.day,
+            lead_days: t.lead_days,
+        }
+    }
+
+    fn at(d: &str, t: &str) -> NaiveDateTime {
+        day(d).and_time(time(t))
     }
 
     // 2026-11-09 is a Monday.
@@ -759,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn rollover_returns_unfinished_tasks_quietly() {
+    fn unfinished_today_tasks_stay_marked_as_carried() {
         let s = Store::open_in_memory().unwrap();
         let p = s.add_project("Website", "#5B8DEF").unwrap();
         let early = s.add_task("before first run", None, true).unwrap();
@@ -771,10 +1043,31 @@ mod tests {
         assert!(!s.start_day(day(MON)).unwrap(), "runs once per day");
         assert_eq!(s.today().unwrap().len(), 2);
 
+        let fresh = s.add_task("fresh", None, false).unwrap();
         assert!(s.start_day(day(TUE)).unwrap());
-        assert!(s.today().unwrap().is_empty());
-        assert_eq!(s.inbox().unwrap()[0].id, inbox_task);
+        let today = s.today().unwrap();
+        assert_eq!(today.len(), 2, "nothing is lost overnight");
+        assert!(today.iter().all(|t| t.carried));
+
+        // Something new for today sorts above what came along.
+        s.set_in_today(fresh, true).unwrap();
+        let today = s.today().unwrap();
+        assert_eq!(today[0].id, fresh);
+        assert!(!today[0].carried);
+
+        s.keep_carried(inbox_task).unwrap();
+        let kept = s.task(inbox_task).unwrap().unwrap();
+        assert!(kept.in_today && !kept.carried);
+
+        s.settle_carried(false).unwrap();
+        assert!(!s.task(project_task).unwrap().unwrap().in_today, "sent back to its project");
         assert_eq!(s.project_tasks(p).unwrap()[0].id, project_task);
+        assert_eq!(s.today().unwrap().len(), 2);
+
+        // Done tasks leave Today overnight.
+        s.complete(fresh, now()).unwrap();
+        s.start_day(day(TUE) + Duration::days(1)).unwrap();
+        assert!(!s.task(fresh).unwrap().unwrap().in_today);
     }
 
     #[test]
@@ -803,12 +1096,14 @@ mod tests {
         assert!(!s.task(daily).unwrap().unwrap().is_done());
 
         s.start_day(day(TUE)).unwrap();
-        let today: Vec<_> = s.today().unwrap().into_iter().map(|t| t.title).collect();
-        assert_eq!(today, ["daily", "weekdays"]);
+        let today: Vec<_> = s.today().unwrap().into_iter().map(|t| (t.title, t.carried)).collect();
+        // Mondays was not done, so it stays, marked as carried.
+        assert_eq!(today, [("daily".into(), false), ("weekdays".into(), false), ("mondays".to_string(), true)]);
 
+        s.settle_carried(false).unwrap();
         s.start_day(day(SAT)).unwrap();
-        let today: Vec<_> = s.today().unwrap().into_iter().map(|t| t.title).collect();
-        assert_eq!(today, ["daily"]);
+        let today: Vec<_> = s.today().unwrap().into_iter().map(|t| (t.title, t.carried)).collect();
+        assert_eq!(today, [("daily".to_string(), false), ("weekdays".into(), true)]);
 
         // Undoing the Monday completion removes the done copy.
         let copy = s.done_on(day(MON)).unwrap()[0].id;
@@ -818,7 +1113,7 @@ mod tests {
     }
 
     #[test]
-    fn reminders_ring_once_and_never_late() {
+    fn reminders_ring_again_once_and_mark_missed_ones() {
         let s = Store::open_in_memory().unwrap();
         let a = s.add_task("call", None, false).unwrap();
         let mut e = edit(&s, a);
@@ -826,17 +1121,116 @@ mod tests {
         s.update_task(a, &e, day(MON)).unwrap();
         assert!(s.task(a).unwrap().unwrap().in_today, "a reminder brings the task into Today");
 
-        let grace = chrono::Duration::minutes(30);
-        assert!(s.take_due_reminders(day(MON), time("13:59"), grace).unwrap().is_empty());
-        assert_eq!(s.take_due_reminders(day(MON), time("14:00"), grace).unwrap().len(), 1);
-        assert!(s.take_due_reminders(day(MON), time("14:05"), grace).unwrap().is_empty());
+        let grace = Duration::minutes(30);
+        assert!(s.take_due_reminders(at(MON, "13:59"), grace).unwrap().is_empty());
+        assert_eq!(s.take_due_reminders(at(MON, "14:00"), grace).unwrap().len(), 1);
+        assert!(s.task(a).unwrap().unwrap().reminder_open);
+        assert!(s.take_due_reminders(at(MON, "14:05"), grace).unwrap().is_empty());
+        // Nobody reacted: one more ring, then quiet.
+        assert_eq!(s.take_due_reminders(at(MON, "14:10"), grace).unwrap().len(), 1);
+        assert!(s.take_due_reminders(at(MON, "14:30"), grace).unwrap().is_empty());
+        assert!(s.task(a).unwrap().unwrap().reminder_open, "still marked until you react");
+        s.acknowledge_reminder(a).unwrap();
+        assert!(!s.task(a).unwrap().unwrap().reminder_open);
 
-        // Next day it is back in Today only if it repeats; here it does not,
-        // so put it back by hand and start the PC late.
+        // The PC was off at 14:00: no late ring, but the task shows it.
         s.start_day(day(TUE)).unwrap();
-        s.set_in_today(a, true).unwrap();
-        assert!(s.take_due_reminders(day(TUE), time("16:00"), grace).unwrap().is_empty());
-        assert!(s.take_due_reminders(day(TUE), time("16:01"), grace).unwrap().is_empty());
+        assert!(s.task(a).unwrap().unwrap().in_today, "unfinished, so it stays");
+        assert!(s.take_due_reminders(at(TUE, "16:00"), grace).unwrap().is_empty());
+        assert!(s.task(a).unwrap().unwrap().reminder_open);
+        assert!(s.take_due_reminders(at(TUE, "16:30"), grace).unwrap().is_empty());
+    }
+
+    #[test]
+    fn snoozing_rings_later_and_completing_stops_it() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.add_task("stretch", None, true).unwrap();
+        let mut e = edit(&s, a);
+        e.reminder = Some(time("09:00"));
+        s.update_task(a, &e, day(MON)).unwrap();
+        let grace = Duration::minutes(30);
+        assert_eq!(s.take_due_reminders(at(MON, "09:00"), grace).unwrap().len(), 1);
+
+        s.snooze(a, at(MON, "10:00")).unwrap();
+        assert!(!s.task(a).unwrap().unwrap().reminder_open);
+        assert!(s.take_due_reminders(at(MON, "09:10"), grace).unwrap().is_empty(), "snooze replaces the second ring");
+        assert_eq!(s.take_due_reminders(at(MON, "10:00"), grace).unwrap().len(), 1);
+        assert!(s.take_due_reminders(at(MON, "10:10"), grace).unwrap().is_empty(), "a snoozed ring does not repeat");
+
+        s.snooze(a, at(MON, "11:00")).unwrap();
+        s.complete(a, now()).unwrap();
+        assert!(s.take_due_reminders(at(MON, "11:00"), grace).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_day_brings_the_task_into_today_once() {
+        let s = Store::open_in_memory().unwrap();
+        s.start_day(day(MON)).unwrap();
+        let rent = s.add_task("pay rent", None, false).unwrap();
+        let mut e = edit(&s, rent);
+        e.day = Some(day(SAT));
+        e.lead_days = 2;
+        s.update_task(rent, &e, day(MON)).unwrap();
+        assert!(!s.task(rent).unwrap().unwrap().in_today, "Saturday is still far away");
+
+        s.start_day(day("2026-11-11")).unwrap();
+        assert!(s.today().unwrap().is_empty());
+        s.start_day(day("2026-11-12")).unwrap();
+        assert_eq!(s.today().unwrap()[0].id, rent, "two days before Saturday");
+
+        // Sent back on purpose: it does not keep coming back.
+        s.set_in_today(rent, false).unwrap();
+        s.start_day(day("2026-11-13")).unwrap();
+        assert!(s.today().unwrap().is_empty());
+
+        // A day that has already arrived brings the task in right away.
+        let call = s.add_task("call mum", None, false).unwrap();
+        let mut e = edit(&s, call);
+        e.day = Some(day("2026-11-13"));
+        s.update_task(call, &e, day("2026-11-13")).unwrap();
+        assert!(s.task(call).unwrap().unwrap().in_today);
+        assert_eq!(s.task(call).unwrap().unwrap().day, Some(day("2026-11-13")));
+    }
+
+    #[test]
+    fn sorting_the_inbox() {
+        let s = Store::open_in_memory().unwrap();
+        let p = s.add_project("Home", "#5B8DEF").unwrap();
+        let a = s.add_task("a", None, false).unwrap();
+        let b = s.add_task("b", None, false).unwrap();
+        let c = s.add_task("c", None, false).unwrap();
+        s.add_task("already today", None, true).unwrap();
+        assert_eq!(s.inbox_unsorted_count().unwrap(), 3);
+
+        s.mark_reviewed(a).unwrap();
+        s.move_to_project(b, p).unwrap();
+        assert_eq!(s.inbox_unsorted_count().unwrap(), 1);
+        let order: Vec<_> = s.inbox_to_sort().unwrap().into_iter().map(|t| t.id).collect();
+        assert_eq!(order, [c, a], "unsorted first, kept ones after");
+        assert_eq!(s.project_tasks(p).unwrap()[0].id, b);
+    }
+
+    #[test]
+    fn days_people_type() {
+        let today = day(TUE); // Tuesday 10 November 2026
+        let d = |t: &str| parse_day(t, today).map(|d| d.format("%Y-%m-%d").to_string());
+        assert_eq!(d("today").as_deref(), Some("2026-11-10"));
+        assert_eq!(d("Tomorrow").as_deref(), Some("2026-11-11"));
+        assert_eq!(d("fri").as_deref(), Some("2026-11-13"));
+        assert_eq!(d("tuesday").as_deref(), Some("2026-11-10"));
+        assert_eq!(d("mon").as_deref(), Some("2026-11-16"));
+        assert_eq!(d("+3").as_deref(), Some("2026-11-13"));
+        assert_eq!(d("in 3 days").as_deref(), Some("2026-11-13"));
+        assert_eq!(d("2w").as_deref(), Some("2026-11-24"));
+        assert_eq!(d("14 nov").as_deref(), Some("2026-11-14"));
+        assert_eq!(d("Nov 14").as_deref(), Some("2026-11-14"));
+        assert_eq!(d("14-11").as_deref(), Some("2026-11-14"));
+        assert_eq!(d("3/1").as_deref(), Some("2027-01-03"), "passed this year, so next year");
+        assert_eq!(d("2027-02-01").as_deref(), Some("2027-02-01"));
+        assert_eq!(d("1 march 2028").as_deref(), Some("2028-03-01"));
+        assert_eq!(d("31 feb"), None);
+        assert_eq!(d("soon"), None);
+        assert_eq!(d("3"), None);
     }
 
     #[test]
