@@ -14,7 +14,9 @@ pub fn open(window: &mut Window, cx: &mut App) {
     let queue = data::read(cx, |s| s.inbox_to_sort());
     let sorter = cx.new(|cx| InboxSorter::new(queue, cx));
     let focus = sorter.read(cx).focus.clone();
-    window.open_dialog(cx, move |dialog, _, _| dialog.title("Sort the Inbox").w(px(560.)).child(sorter.clone()));
+    window.open_dialog(cx, move |dialog, window, _| {
+        dialog.title("Sort the Inbox").w(style::dialog_width(560., window)).child(sorter.clone())
+    });
     window.focus(&focus, cx);
 }
 

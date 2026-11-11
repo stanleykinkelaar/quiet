@@ -1,13 +1,15 @@
-//! Updating from inside the app. When asked (the button in Settings), Quiet
-//! looks up the newest GitHub release, downloads this system's file, checks
-//! it against the release's SHA256SUMS, installs it and starts again.
+//! Updating from inside the app. Quiet looks up the newest GitHub release,
+//! downloads this system's file, checks it against the release's
+//! SHA256SUMS, installs it and starts again.
 //!
-//! Quiet never goes online by itself: nothing here runs until you press the
-//! button.
+//! With automatic updates on (the default, a switch in Settings) Quiet
+//! checks a few times a day and installs a new version only while none of
+//! its windows are open, so it never restarts under your hands. With them
+//! off, Quiet goes online only when you press Check for updates.
 
 use std::io::{Read as _, Write as _};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use gpui_kit::{App, AppContext as _, Global, SharedString};
@@ -16,7 +18,8 @@ use sha2::{Digest as _, Sha256};
 use crate::data;
 
 const REPO: &str = "stanleykinkelaar/Quiet";
-pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
+/// Set by build.rs: the released version, or Cargo.toml's for local builds.
+pub const CURRENT: &str = env!("QUIET_VERSION");
 
 /// The release file for this system. The names carry no version.
 #[cfg(windows)]
@@ -37,20 +40,84 @@ pub enum State {
     Failed(SharedString),
 }
 
+/// The first automatic check waits a little, so starting stays quick.
+const FIRST_CHECK: Duration = Duration::from_secs(60);
+/// How often the automatic check asks GitHub.
+const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+/// How often a found update looks for a moment with no window open.
+const TICK: Duration = Duration::from_secs(5 * 60);
+
+const AUTO_SETTING: &str = "auto_update";
+
 /// Lives as a global, so a download carries on when the window is closed.
-pub struct Updater(State);
+pub struct Updater {
+    state: State,
+    /// A version whose automatic install failed. It is not tried again by
+    /// itself until Quiet restarts; the button in Settings still works.
+    failed_auto: Option<String>,
+}
 impl Global for Updater {}
 
 pub fn init(cx: &mut App) {
-    cx.set_global(Updater(State::Idle));
+    cx.set_global(Updater { state: State::Idle, failed_auto: None });
 }
 
 pub fn state(cx: &App) -> State {
-    cx.global::<Updater>().0.clone()
+    cx.global::<Updater>().state.clone()
 }
 
 fn set(state: State, cx: &mut App) {
-    cx.global_mut::<Updater>().0 = state;
+    cx.global_mut::<Updater>().state = state;
+}
+
+/// Automatic updates are on unless switched off in Settings.
+pub fn auto_enabled(cx: &App) -> bool {
+    data::read(cx, |s| s.setting(AUTO_SETTING)).as_deref() != Some("0")
+}
+
+pub fn set_auto(enabled: bool, cx: &mut App) {
+    data::change(cx, |s| s.set_setting(AUTO_SETTING, if enabled { "1" } else { "0" }));
+}
+
+/// Starts the automatic updater. It does nothing while switched off.
+pub fn start(cx: &mut App) {
+    if unsupported().is_some() {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(FIRST_CHECK).await;
+        let mut last_check: Option<Instant> = None;
+        loop {
+            let due = last_check.is_none_or(|at| at.elapsed() >= CHECK_EVERY);
+            let check = cx.update(|cx| {
+                auto_enabled(cx) && due && matches!(state(cx), State::Idle | State::UpToDate | State::Failed(_))
+            });
+            if check {
+                last_check = Some(Instant::now());
+                let latest = cx.background_executor().spawn(async { latest_version() }).await;
+                cx.update(|cx| match latest {
+                    Ok(version) if is_newer(&version, CURRENT) => set(State::Available(version), cx),
+                    Ok(_) => set(State::UpToDate, cx),
+                    // Quietly: the next check tries again.
+                    Err(err) => data::log_error(&err.context("checking for updates automatically")),
+                });
+            }
+            cx.update(install_when_unseen);
+            cx.background_executor().timer(TICK).await;
+        }
+    })
+    .detach();
+}
+
+/// Installs a found update, but only while no window is open, and starts
+/// the new version in the background (tray only), as Quiet was.
+fn install_when_unseen(cx: &mut App) {
+    let State::Available(version) = state(cx) else { return };
+    let tried = cx.global::<Updater>().failed_auto.as_ref() == Some(&version);
+    if !auto_enabled(cx) || tried || !cx.windows().is_empty() {
+        return;
+    }
+    start_install(version, true, cx);
 }
 
 /// Why this copy cannot update itself, if it cannot.
@@ -84,14 +151,30 @@ pub fn check(cx: &mut App) {
 /// Downloads and installs `version`, then quits. A small helper process
 /// waits for Quiet to exit and starts the new version.
 pub fn install(version: String, cx: &mut App) {
+    start_install(version, false, cx);
+}
+
+/// `background`: the new version starts in the tray, without its window.
+fn start_install(version: String, background: bool, cx: &mut App) {
     set(State::Installing(version.clone()), cx);
-    let installed = cx.background_spawn(async move { download_and_apply(&version) });
+    let installed = cx.background_spawn({
+        let version = version.clone();
+        async move { download_and_apply(&version, background) }
+    });
     cx.spawn(async move |cx| match installed.await {
         Ok(()) => cx.update(|cx| cx.quit()),
         Err(err) => {
             let message = format!("The update did not install: {err:#}");
-            data::log_error(&err.context("installing the update"));
-            cx.update(|cx| set(State::Failed(message.into()), cx));
+            data::log_error(&err.context(format!("installing Quiet {version}")));
+            cx.update(|cx| {
+                if background {
+                    // Nobody is watching: offer it in Settings instead.
+                    cx.global_mut::<Updater>().failed_auto = Some(version.clone());
+                    set(State::Available(version), cx);
+                } else {
+                    set(State::Failed(message.into()), cx);
+                }
+            });
         }
     })
     .detach();
@@ -100,7 +183,7 @@ pub fn install(version: String, cx: &mut App) {
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(600)))
-        .user_agent(concat!("Quiet/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Quiet/", env!("QUIET_VERSION")))
         .build()
         .into()
 }
@@ -126,7 +209,7 @@ fn is_newer(candidate: &str, current: &str) -> bool {
     matches!((parse(candidate), parse(current)), (Some(a), Some(b)) if a > b)
 }
 
-fn download_and_apply(version: &str) -> anyhow::Result<()> {
+fn download_and_apply(version: &str, background: bool) -> anyhow::Result<()> {
     let base = format!("https://github.com/{REPO}/releases/download/v{version}");
     let agent = agent();
 
@@ -141,7 +224,8 @@ fn download_and_apply(version: &str) -> anyhow::Result<()> {
     if actual != expected {
         bail!("the download is damaged (checksum mismatch), nothing was changed");
     }
-    apply(&file, &dir)
+    let args: &[&str] = if background { &[crate::platform::autostart::BACKGROUND_ARG] } else { &[] };
+    apply(&file, &dir, args)
 }
 
 /// Finds `name` in `sha256sum` output: `<hex>  <name>` per line.
@@ -174,7 +258,7 @@ fn download(agent: &ureq::Agent, url: &str, dest: &Path) -> anyhow::Result<Strin
 /// Windows: once Quiet has exited, run the installer silently (it updates
 /// the per-user install in place), then start Quiet again.
 #[cfg(windows)]
-fn apply(setup: &Path, dir: &Path) -> anyhow::Result<()> {
+fn apply(setup: &Path, dir: &Path, args: &[&str]) -> anyhow::Result<()> {
     use std::os::windows::process::CommandExt as _;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -183,10 +267,16 @@ fn apply(setup: &Path, dir: &Path) -> anyhow::Result<()> {
     let current = std::env::current_exe()?;
     // PowerShell single-quoted strings only need ' doubled.
     let quote = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', "''"));
+    let arguments = if args.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = args.iter().map(|a| format!("'{}'", a.replace('\'', "''"))).collect();
+        format!(" -ArgumentList {}", list.join(","))
+    };
     let script = format!(
         "Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue; \
          $p = Start-Process -FilePath {setup} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru; \
-         if ($p.ExitCode -eq 0) {{ Start-Process {installed} }} else {{ Start-Process {current} }}; \
+         if ($p.ExitCode -eq 0) {{ Start-Process {installed}{arguments} }} else {{ Start-Process {current}{arguments} }}; \
          Remove-Item -Recurse -Force {dir} -ErrorAction SilentlyContinue",
         pid = std::process::id(),
         setup = quote(setup),
@@ -205,7 +295,7 @@ fn apply(setup: &Path, dir: &Path) -> anyhow::Result<()> {
 /// macOS: swap Quiet.app for the new one (a running app can be replaced),
 /// then reopen it once this copy has exited.
 #[cfg(target_os = "macos")]
-fn apply(zip: &Path, dir: &Path) -> anyhow::Result<()> {
+fn apply(zip: &Path, dir: &Path, args: &[&str]) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
     let bundle = exe
         .ancestors()
@@ -235,13 +325,18 @@ fn apply(zip: &Path, dir: &Path) -> anyhow::Result<()> {
     std::fs::remove_dir_all(&old).ok();
     std::fs::remove_dir_all(dir).ok();
     std::process::Command::new("xattr").arg("-dr").arg("com.apple.quarantine").arg(&bundle).status().ok();
-    relaunch(std::process::Command::new("open").arg(&bundle))
+    let mut open = std::process::Command::new("open");
+    open.arg(&bundle);
+    if !args.is_empty() {
+        open.arg("--args").args(args);
+    }
+    relaunch(&mut open)
 }
 
 /// Linux: replace the binary by rename (the running copy keeps its old
 /// file), then start the new one once this copy has exited.
 #[cfg(target_os = "linux")]
-fn apply(tarball: &Path, dir: &Path) -> anyhow::Result<()> {
+fn apply(tarball: &Path, dir: &Path, args: &[&str]) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let exe = std::env::current_exe()?;
@@ -256,7 +351,7 @@ fn apply(tarball: &Path, dir: &Path) -> anyhow::Result<()> {
     std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     std::fs::rename(&staged, &exe)?;
     std::fs::remove_dir_all(dir).ok();
-    relaunch(&mut std::process::Command::new(&exe))
+    relaunch(std::process::Command::new(&exe).args(args))
 }
 
 #[cfg(unix)]

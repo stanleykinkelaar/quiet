@@ -1,5 +1,6 @@
-//! Embeds the app icon (drawn by `src/icon.rs`) into the Windows exe as
-//! icon resource 1, which GPUI uses for the window and the taskbar.
+//! Sets the version the app reports, and embeds the app icon (drawn by
+//! `src/icon.rs`) into the Windows exe as icon resource 1, which GPUI uses
+//! for the window and the taskbar.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -10,6 +11,17 @@ mod icon;
 fn main() {
     println!("cargo:rerun-if-changed=src/icon.rs");
     println!("cargo:rerun-if-changed=build.rs");
+
+    // The release workflow builds before it bumps Cargo.toml, so it passes
+    // the version it is about to release in QUIET_VERSION. Without it (a
+    // local build) the Cargo.toml version is used.
+    println!("cargo:rerun-if-env-changed=QUIET_VERSION");
+    let version = std::env::var("QUIET_VERSION")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap());
+    println!("cargo:rustc-env=QUIET_VERSION={}", version.trim());
+
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }

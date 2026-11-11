@@ -31,7 +31,9 @@ pub fn open_main(cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(920.), px(680.)), cx)),
         titlebar: Some(TitlebarOptions { title: Some("Quiet".into()), ..Default::default() }),
-        window_min_size: Some(size(px(560.), px(420.))),
+        // Small enough to sit beside other windows; below 640px wide the
+        // layout folds into its compact form (see ui::Layout).
+        window_min_size: Some(size(px(360.), px(400.))),
         // Matches StartupWMClass in quiet.desktop, so Linux docks and
         // launchers show the right icon.
         app_id: Some("quiet".into()),
@@ -168,6 +170,7 @@ fn main() {
         start_system(cx, request_rx);
 
         reminders::start(cx);
+        update::start(cx);
 
         match request {
             Request::Capture => capture::open(cx),
