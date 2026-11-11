@@ -67,6 +67,7 @@ The Linux build is x86_64 only for now. It needs Wayland or X11 with Vulkan driv
 | A | Make it the project's next action (inside a project) |
 | E | Edit the project (name, colour, archive) |
 | K | Keep a task from an earlier day in Today |
+| P | Plan today, one question at a time (on Today) |
 | S | Sort the Inbox, one task at a time (on Today and Inbox) |
 | Delete | Delete the task (an Undo note appears) |
 | Up, Down | Move the selection |
@@ -76,6 +77,8 @@ The Linux build is x86_64 only for now. It needs Wayland or X11 with Vulkan driv
 How the day works:
 
 * Today is yours to fill. Past five tasks you get a gentle note, nothing more.
+* Plan today (P, or the line at the top of Today until you have) walks you through it one question at a time. First the tasks left from earlier days: keep or not today. Then what you could do: tasks with a day in the coming week, each project's next action, then the Inbox. Today, not today, or already done. At five it stops and says the day is full; S stops sooner. Last, you pick what to start with.
+* The first task in Today is marked Now, so starting needs no decision. Finish it and the next one moves up. Reorder with Alt+Up and Alt+Down to change what comes first.
 * Unfinished Today tasks stay overnight, under "From earlier". Keep them (K, or Keep all) or send them back to their project or the Inbox (T, or Send all back). Skipping a morning loses nothing. Nothing turns red and nothing is counted.
 * Repeating tasks (every day, every weekday, or weekly on one day) come into Today on their days.
 * A task can have a day (type fri, tomorrow, +3 or 14 nov). It comes into Today on that day, or up to a week before if you choose. Sent back, it does not keep returning. After the day it simply stays, never red.
