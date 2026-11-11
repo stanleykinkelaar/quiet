@@ -76,8 +76,7 @@ impl MainView {
             .into_any_element()
     }
 
-    /// The version, and a button that checks for a newer one. Quiet only
-    /// goes online when it is pressed.
+    /// The automatic updates switch, and a button that checks right now.
     fn render_update(&self, cx: &mut Context<Self>) -> AnyElement {
         let subtle = style::subtle(cx);
         if let Some(reason) = update::unsupported() {
@@ -102,8 +101,18 @@ impl MainView {
             State::Checking => Button::new("check-update").label("Checking").loading(true),
             _ => Button::new("check-update").label("Check for updates").on_click(|_, _, cx| update::check(cx)),
         };
+        let auto = update::auto_enabled(cx);
         v_flex()
-            .gap_2()
+            .gap_3()
+            .child(
+                Switch::new("auto-update")
+                    .checked(auto)
+                    .label("Update automatically")
+                    .on_change(cx.listener(|_, checked: &bool, _, cx| {
+                        update::set_auto(*checked, cx);
+                        cx.notify();
+                    })),
+            )
             .child(h_flex().child(button))
             .children(note.map(|note| div().text_sm().text_color(subtle).child(note)))
             .into_any_element()
@@ -144,7 +153,15 @@ impl MainView {
             ))
             .child(section(
                 "Updates",
-                format!("You have Quiet {}. Quiet only goes online when you check.", update::CURRENT).into(),
+                if update::auto_enabled(cx) {
+                    format!(
+                        "You have Quiet {}. A few times a day Quiet looks for a new version and installs it while its window is closed.",
+                        update::CURRENT
+                    )
+                } else {
+                    format!("You have Quiet {}. Quiet only goes online when you check.", update::CURRENT)
+                }
+                .into(),
                 self.render_update(cx),
             ))
             .when(!platform::notifications_enabled(), |this| {

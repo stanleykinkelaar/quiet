@@ -170,6 +170,7 @@ fn main() {
         start_system(cx, request_rx);
 
         reminders::start(cx);
+        update::start(cx);
 
         match request {
             Request::Capture => capture::open(cx),

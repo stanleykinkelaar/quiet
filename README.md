@@ -6,7 +6,7 @@ A small, calm to-do app for Windows, macOS and Linux. It is built around what it
 
 Quiet has an Inbox, a few flat projects, a Today list you pick yourself, and a Done list that shows what you finished. There are no priorities, due dates, labels, overdue warnings or counters (apart from "done today").
 
-Pure Rust: GPUI and gpui-component for the interface, SQLite (bundled) for storage. No accounts, no telemetry. Quiet goes online only when you press Check for updates in Settings.
+Pure Rust: GPUI and gpui-component for the interface, SQLite (bundled) for storage. No accounts, no telemetry. The only thing Quiet asks the internet is whether a new version exists, and you can switch that off in Settings.
 
 ## Install
 
@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/stanleykinkelaar/Quiet/main/install
 irm https://raw.githubusercontent.com/stanleykinkelaar/Quiet/main/install.ps1 | iex
 ```
 
-To update, open Settings and press Check for updates. Quiet downloads the new version, checks it against the release's checksums, installs it and starts again. Running the install command again works too. Nothing needs admin rights. You can also download the files yourself from the [latest release](https://github.com/stanleykinkelaar/Quiet/releases/latest).
+Quiet updates itself. A few times a day it asks GitHub for the newest release. When there is one, it waits until its window is closed, then downloads it, checks it against the release's checksums, installs it and starts again in the tray. Switch off Update automatically in Settings to stop that; Check for updates in Settings still works then. Running the install command again works too. Nothing needs admin rights. You can also download the files yourself from the [latest release](https://github.com/stanleykinkelaar/Quiet/releases/latest).
 
 What goes where:
 
@@ -182,7 +182,7 @@ src/capture.rs    the quick capture window
 src/system.rs     tray icon and global hotkey (per system)
 src/reminders.rs  the once a day rollover and reminder notifications
 src/platform.rs   single instance, start at sign-in, notification check
-src/update.rs     check for updates, download, verify and install from Settings
+src/update.rs     automatic and manual updates: check, download, verify, install
 build.rs          draws the app icon into the Windows exe
 installer/        Inno Setup script (Windows)
 packaging/        icon tool, macOS bundle script, Linux tarball and .desktop file
