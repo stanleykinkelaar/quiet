@@ -45,6 +45,11 @@ jobs:
   windows:
     needs: version
     runs-on: windows-latest
+    # The builds run before the release job bumps Cargo.toml, so build.rs
+    # bakes the version about to be released into the binary. Settings
+    # shows it and the updater compares against it.
+    env:
+      QUIET_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -67,6 +72,11 @@ jobs:
   macos:
     needs: version
     runs-on: macos-latest
+    # The builds run before the release job bumps Cargo.toml, so build.rs
+    # bakes the version about to be released into the binary. Settings
+    # shows it and the updater compares against it.
+    env:
+      QUIET_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -92,6 +102,11 @@ jobs:
     needs: version
     # The oldest supported runner, so the binary runs on older glibc too.
     runs-on: ubuntu-22.04
+    # The builds run before the release job bumps Cargo.toml, so build.rs
+    # bakes the version about to be released into the binary. Settings
+    # shows it and the updater compares against it.
+    env:
+      QUIET_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
       - name: Install GPUI's build dependencies

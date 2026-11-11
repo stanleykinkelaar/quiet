@@ -16,7 +16,8 @@ use sha2::{Digest as _, Sha256};
 use crate::data;
 
 const REPO: &str = "stanleykinkelaar/Quiet";
-pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
+/// Set by build.rs: the released version, or Cargo.toml's for local builds.
+pub const CURRENT: &str = env!("QUIET_VERSION");
 
 /// The release file for this system. The names carry no version.
 #[cfg(windows)]
@@ -100,7 +101,7 @@ pub fn install(version: String, cx: &mut App) {
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(600)))
-        .user_agent(concat!("Quiet/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Quiet/", env!("QUIET_VERSION")))
         .build()
         .into()
 }
