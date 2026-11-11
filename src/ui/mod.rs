@@ -67,7 +67,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("2", ShowInbox, list),
         KeyBinding::new("3", ShowProjects, list),
         KeyBinding::new("4", ShowDone, list),
-        KeyBinding::new("ctrl-,", ShowSettings, Some("Quiet")),
+        KeyBinding::new(if cfg!(target_os = "macos") { "cmd-," } else { "ctrl-," }, ShowSettings, Some("Quiet")),
         KeyBinding::new("escape", GoBack, list),
         KeyBinding::new("backspace", GoBack, list),
         KeyBinding::new("escape", FocusList, Some("Quiet > Input")),

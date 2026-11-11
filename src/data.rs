@@ -61,15 +61,26 @@ pub fn today() -> NaiveDate {
     Local::now().date_naive()
 }
 
-/// `%APPDATA%\Quiet\quiet.db` on Windows. `QUIET_DB` overrides it, which is
-/// handy for trying things out without touching the real list.
+/// Where the list lives:
+///
+/// * Windows: `%APPDATA%\Quiet\quiet.db`
+/// * macOS: `~/Library/Application Support/Quiet/quiet.db`
+/// * Linux: `$XDG_DATA_HOME/quiet/quiet.db`, so `~/.local/share/quiet/quiet.db`
+///
+/// `QUIET_DB` overrides it, which is handy for trying things out without
+/// touching the real list.
 pub fn database_path() -> PathBuf {
     if let Some(path) = std::env::var_os("QUIET_DB") {
         return PathBuf::from(path);
     }
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("Quiet").join("quiet.db")
+    let home = || std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let env = |name| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let dir = if cfg!(windows) {
+        env("APPDATA").unwrap_or_else(|| PathBuf::from(".")).join("Quiet")
+    } else if cfg!(target_os = "macos") {
+        home().join("Library/Application Support/Quiet")
+    } else {
+        env("XDG_DATA_HOME").unwrap_or_else(|| home().join(".local/share")).join("quiet")
+    };
+    dir.join("quiet.db")
 }

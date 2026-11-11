@@ -27,16 +27,46 @@ pub fn open(cx: &mut App) {
     {
         return;
     }
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::centered(size(px(560.), px(108.)), cx)),
+    let bounds = size(px(560.), px(108.));
+    let options = || WindowOptions {
         titlebar: None,
         kind: WindowKind::PopUp,
         is_resizable: false,
         is_minimizable: false,
         focus: true,
         show: true,
+        app_id: Some("quiet-capture".into()),
         ..Default::default()
     };
+    // On Wayland a normal window cannot place itself, and tiling desktops
+    // like Hyprland would tile it. An overlay layer, as launchers use, sits
+    // centred above everything and takes the keyboard. Desktops without
+    // layer shell (GNOME) get the normal popup.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        let overlay = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds { origin: Point::default(), size: bounds })),
+            kind: WindowKind::LayerShell(layer_shell::LayerShellOptions {
+                namespace: "quiet-capture".into(),
+                layer: layer_shell::Layer::Overlay,
+                keyboard_interactivity: layer_shell::KeyboardInteractivity::Exclusive,
+                ..Default::default()
+            }),
+            ..options()
+        };
+        if let Ok(handle) = open_capture(overlay, cx) {
+            cx.set_global(CaptureWindow(Some(handle)));
+            return;
+        }
+    }
+    let popup = WindowOptions { window_bounds: Some(WindowBounds::centered(bounds, cx)), ..options() };
+    match open_capture(popup, cx) {
+        Ok(handle) => cx.set_global(CaptureWindow(Some(handle))),
+        Err(err) => data::log_error(&err),
+    }
+}
+
+fn open_capture(options: WindowOptions, cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
     let opened = gpui_kit::open_window(options, cx, |window, cx| {
         Theme::sync_system_appearance(Some(window), cx);
         window.on_window_should_close(cx, |_, cx| {
@@ -45,10 +75,7 @@ pub fn open(cx: &mut App) {
         });
         cx.new(|cx| CaptureView::new(window, cx))
     });
-    match opened {
-        Ok((handle, _)) => cx.set_global(CaptureWindow(Some(handle))),
-        Err(err) => data::log_error(&err),
-    }
+    Ok(opened?.0)
 }
 
 fn close(window: &mut Window, cx: &mut App) {

@@ -1,9 +1,13 @@
-//! Settings: the capture shortcut and starting with Windows. Nothing more.
+//! Settings: the capture shortcut and starting at sign-in. Nothing more.
 
+#[cfg(not(target_os = "linux"))]
 use gpui_kit::component::button::Button;
+#[cfg(not(target_os = "linux"))]
+use gpui_kit::component::h_flex;
+#[cfg(not(target_os = "linux"))]
 use gpui_kit::component::input::Input;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -29,6 +33,50 @@ impl MainView {
         cx.notify();
     }
 
+    /// Windows and macOS: Quiet registers the shortcut itself.
+    #[cfg(not(target_os = "linux"))]
+    fn render_hotkey(&self, cx: &mut Context<Self>) -> AnyElement {
+        let subtle = style::subtle(cx);
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(div().w(px(260.)).child(Input::new(&self.hotkey_input)))
+                    .child(
+                        Button::new("apply-hotkey")
+                            .label("Save")
+                            .on_click(cx.listener(|this, _, _, cx| this.apply_hotkey(cx))),
+                    ),
+            )
+            .children(
+                self.settings_note
+                    .clone()
+                    .map(|note| div().text_sm().text_color(subtle).child(note)),
+            )
+            .into_any_element()
+    }
+
+    /// Linux: the desktop owns global shortcuts, so bind one there.
+    #[cfg(target_os = "linux")]
+    fn render_hotkey(&self, cx: &mut Context<Self>) -> AnyElement {
+        let subtle = style::subtle(cx);
+        v_flex()
+            .gap_2()
+            .text_sm()
+            .text_color(subtle)
+            .child("Add a shortcut in your desktop's keyboard settings that runs:")
+            .child(div().font_family("monospace").text_color(cx.theme().foreground).child("quiet --capture"))
+            .child("On Hyprland (Omarchy), add this line to ~/.config/hypr/bindings.conf:")
+            .child(
+                div()
+                    .font_family("monospace")
+                    .text_color(cx.theme().foreground)
+                    .child("bindd = CTRL ALT, SPACE, Quiet capture, exec, quiet --capture"),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let subtle = style::subtle(cx);
         let section = |title: &'static str, caption: &'static str, control: AnyElement| {
@@ -44,28 +92,11 @@ impl MainView {
             .child(section(
                 "Quick capture shortcut",
                 "Opens a small window from anywhere. Type, press Enter, and it lands in your Inbox.",
-                v_flex()
-                    .gap_2()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(div().w(px(260.)).child(Input::new(&self.hotkey_input)))
-                            .child(
-                                Button::new("apply-hotkey")
-                                    .label("Save")
-                                    .on_click(cx.listener(|this, _, _, cx| this.apply_hotkey(cx))),
-                            ),
-                    )
-                    .children(
-                        self.settings_note
-                            .clone()
-                            .map(|note| div().text_sm().text_color(subtle).child(note)),
-                    )
-                    .into_any_element(),
+                self.render_hotkey(cx),
             ))
             .child(section(
-                "Start with Windows",
-                "Quiet waits in the tray after you sign in. Closing the window keeps it there.",
+                platform::AUTOSTART_TITLE,
+                platform::AUTOSTART_CAPTION,
                 Switch::new("autostart")
                     .checked(self.autostart)
                     .label(if self.autostart { "On" } else { "Off" })
