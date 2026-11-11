@@ -1,5 +1,5 @@
 //! The quiet clock: once a day it rolls Today over, and every few seconds
-//! it checks for reminders that are due and shows a Windows notification.
+//! it checks for reminders that are due and shows a system notification.
 
 use std::time::Duration;
 
@@ -14,11 +14,15 @@ const TICK: Duration = Duration::from_secs(15);
 /// rather than shown late.
 const GRACE_MINUTES: i64 = 30;
 
+#[cfg(windows)]
 pub const APP_ID: &str = "Quiet.Tasks";
 
 pub fn start(cx: &mut App) {
     #[cfg(windows)]
     register_app_id(cx);
+    // Notifications are attributed to the app bundle. Only works once.
+    #[cfg(target_os = "macos")]
+    notify_rust::set_application(crate::platform::BUNDLE_ID).ok();
     cx.spawn(async move |cx| {
         loop {
             cx.update(tick);
@@ -52,24 +56,20 @@ fn tick(cx: &mut App) {
     }
 }
 
-#[cfg(windows)]
 fn show(title: String, body: String, cx: &mut App) {
     cx.background_spawn(async move {
-        let result = notify_rust::Notification::new()
-            .app_id(APP_ID)
-            .summary(&title)
-            .body(&body)
-            .show();
-        if let Err(err) = result {
+        let mut notification = notify_rust::Notification::new();
+        notification.summary(&title).body(&body);
+        #[cfg(windows)]
+        notification.app_id(APP_ID);
+        // "quiet" is the themed icon the installer puts in place.
+        #[cfg(target_os = "linux")]
+        notification.appname("Quiet").icon("quiet");
+        if let Err(err) = notification.show() {
             data::log_error(&anyhow::anyhow!("notification: {err}"));
         }
     })
     .detach();
-}
-
-#[cfg(not(windows))]
-fn show(title: String, body: String, _: &mut App) {
-    eprintln!("reminder: {title} ({body})");
 }
 
 /// An unpackaged app needs its AppUserModelID registered for toasts to

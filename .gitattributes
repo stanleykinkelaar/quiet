@@ -1,0 +1,4 @@
+# Shell scripts must keep LF endings or sh chokes on them.
+*.sh text eol=lf
+*.desktop text eol=lf
+*.plist text eol=lf

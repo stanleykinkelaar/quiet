@@ -1,0 +1,158 @@
+name: Build and release
+
+# Every push to main builds Windows, macOS and Linux. When the new commits
+# warrant it (conventional commits: fix, perf, feat, or a breaking change),
+# the version in Cargo.toml is bumped, tagged, and published as a GitHub
+# release with those builds attached. See .github/scripts/next-version.sh.
+#
+# Run it by hand (Actions, Build and release, Run workflow) to build the
+# current main again; it releases only if there is something to release.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run at a time, never cancelled halfway: a release that is tagged
+# must also get its files.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.next.outputs.release }}
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: next
+        run: .github/scripts/next-version.sh "$RUNNER_TEMP/notes.md" | tee -a "$GITHUB_OUTPUT"
+      - if: steps.next.outputs.release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: ${{ runner.temp }}/notes.md
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc /DAppVersion=${{ needs.version.outputs.version }} installer\quiet.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\installer\QuietSetup-${{ needs.version.outputs.version }}.exe dist\QuietSetup.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target aarch64-apple-darwin
+      - run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: Bundle Quiet.app
+        run: |
+          lipo -create -output target/quiet \
+            target/aarch64-apple-darwin/release/quiet \
+            target/x86_64-apple-darwin/release/quiet
+          cargo run --release --locked -p quiet-icons -- target/icons
+          packaging/macos/bundle.sh target/quiet target/icons \
+            ${{ needs.version.outputs.version }} dist/Quiet-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  linux:
+    needs: version
+    # The oldest supported runner, so the binary runs on older glibc too.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GPUI's build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev \
+            libwayland-dev libfreetype-dev libfontconfig-dev libvulkan-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p quiet-store
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          cargo run --release --locked -p quiet-icons -- target/icons
+          packaging/linux/package.sh target/release/quiet target/icons dist/quiet-linux-x86_64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  # Only after every build succeeded: bump, tag and publish. A failed build
+  # leaves no tag behind; fix it and the next push releases everything.
+  release:
+    if: needs.version.outputs.release == 'true'
+    needs: [version, windows, macos, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bump, commit and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          current=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "$current" != "$VERSION" ]; then
+            sed -i "0,/^version = \".*\"/s//version = \"$VERSION\"/" Cargo.toml
+            sed -i "/^name = \"quiet\"$/{n;s/^version = \".*\"/version = \"$VERSION\"/}" Cargo.lock
+            git commit -am "chore(release): v$VERSION"
+          fi
+          git tag "v$VERSION"
+          # Atomic: if main moved meanwhile, nothing is pushed and the next
+          # run (queued behind this one) releases everything together.
+          # Pushes made with GITHUB_TOKEN do not start new workflow runs.
+          git push --atomic origin HEAD:main "v$VERSION"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # Asset names carry no version, so .../releases/latest/download/<name>
+      # always points at the newest build. The install scripts rely on that.
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: Quiet ${{ env.VERSION }}
+          body_path: dist/notes.md
+          make_latest: true
+          files: |
+            dist/QuietSetup.exe
+            dist/Quiet-macos.zip
+            dist/quiet-linux-x86_64.tar.gz

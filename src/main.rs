@@ -5,7 +5,6 @@ mod data;
 mod icon;
 mod platform;
 mod reminders;
-#[cfg(windows)]
 mod system;
 mod ui;
 
@@ -13,8 +12,10 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 use quiet_store::Store;
 
-use crate::platform::{autostart, single_instance};
+use crate::platform::{Request, autostart, single_instance};
 use crate::ui::MainView;
+
+actions!(quiet_app, [Quit]);
 
 /// The main window, if it is open. Closing it hides the app to the tray.
 struct MainWindow(Option<AnyWindowHandle>);
@@ -30,6 +31,9 @@ pub fn open_main(cx: &mut App) {
         window_bounds: Some(WindowBounds::centered(size(px(920.), px(680.)), cx)),
         titlebar: Some(TitlebarOptions { title: Some("Quiet".into()), ..Default::default() }),
         window_min_size: Some(size(px(560.), px(420.))),
+        // Matches StartupWMClass in quiet.desktop, so Linux docks and
+        // launchers show the right icon.
+        app_id: Some("quiet".into()),
         ..Default::default()
     };
     let opened = gpui_kit::open_window(options, cx, |window, cx| {
@@ -49,36 +53,39 @@ pub fn open_main(cx: &mut App) {
     }
 }
 
-#[cfg(windows)]
 struct SystemGlobal(system::System);
-#[cfg(windows)]
 impl Global for SystemGlobal {}
 
 /// Registers the quick-capture shortcut, replacing the old one.
 pub fn set_hotkey(spec: &str, cx: &mut App) -> anyhow::Result<()> {
-    #[cfg(windows)]
-    if cx.has_global::<SystemGlobal>() {
-        return cx.global_mut::<SystemGlobal>().0.set_hotkey(spec);
+    match cx.try_global::<SystemGlobal>() {
+        Some(_) => cx.global_mut::<SystemGlobal>().0.set_hotkey(spec),
+        None => anyhow::bail!("the tray did not start, see quiet.log"),
     }
-    let _ = (spec, cx);
-    Ok(())
 }
 
-#[cfg(windows)]
-fn start_system(cx: &mut App, show_requests: async_channel::Receiver<()>) {
+/// Starts the tray and the hotkey, and routes their events, and requests
+/// from other copies of the app, to the UI.
+fn start_system(cx: &mut App, requests: async_channel::Receiver<Request>) {
     let (tx, rx) = async_channel::unbounded();
     match system::System::start(tx.clone()) {
         Ok(system) => cx.set_global(SystemGlobal(system)),
         Err(err) => data::log_error(&err),
     }
-    let hotkey = ui::saved_hotkey(cx);
-    if let Err(err) = set_hotkey(&hotkey, cx) {
-        data::log_error(&err.context(format!("registering {hotkey}")));
+    // Linux has no app-owned global shortcuts; see `quiet --capture`.
+    if cfg!(not(target_os = "linux")) && cx.has_global::<SystemGlobal>() {
+        let hotkey = ui::saved_hotkey(cx);
+        if let Err(err) = set_hotkey(&hotkey, cx) {
+            data::log_error(&err.context(format!("registering {hotkey}")));
+        }
     }
-    // Another copy of the app asked us to show the window.
     cx.background_spawn(async move {
-        while show_requests.recv().await.is_ok() {
-            tx.send(system::SystemEvent::Open).await.ok();
+        while let Ok(request) = requests.recv().await {
+            let event = match request {
+                Request::Show => system::SystemEvent::Open,
+                Request::Capture => system::SystemEvent::QuickCapture,
+            };
+            tx.send(event).await.ok();
         }
     })
     .detach();
@@ -97,7 +104,13 @@ fn start_system(cx: &mut App, show_requests: async_channel::Receiver<()>) {
 fn main() {
     let db_path = data::database_path();
     let scope = format!("{:x}", fnv1a(&db_path.to_string_lossy()));
-    let listener = match single_instance::acquire(&scope) {
+    let args: Vec<String> = std::env::args().collect();
+    let request = if args.iter().any(|a| a == platform::CAPTURE_ARG) {
+        Request::Capture
+    } else {
+        Request::Show
+    };
+    let listener = match single_instance::acquire(&scope, request) {
         single_instance::Instance::First(listener) => listener,
         single_instance::Instance::Second => return,
     };
@@ -112,9 +125,12 @@ fn main() {
     if let Err(err) = store.start_day(data::today()) {
         data::log_error(&err);
     }
-    let background = std::env::args().any(|a| a == autostart::BACKGROUND_ARG);
+    let background = args.iter().any(|a| a == autostart::BACKGROUND_ARG);
 
-    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    // macOS: clicking the Dock icon brings the window back.
+    app.on_reopen(open_main);
+    app.run(move |cx| {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Light, None, cx);
         cx.set_quit_mode(QuitMode::Explicit);
@@ -122,8 +138,20 @@ fn main() {
         cx.set_global(MainWindow(None));
         ui::bind_keys(cx);
         capture::bind_keys(cx);
+        // Cmd+Q on macOS, Ctrl+Q elsewhere. Closing the window only hides it.
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        let quit_key = if cfg!(target_os = "macos") { "cmd-q" } else { "ctrl-q" };
+        cx.bind_keys([KeyBinding::new(quit_key, Quit, None)]);
+        #[cfg(target_os = "macos")]
+        {
+            cx.set_menus(vec![Menu {
+                name: "Quiet".into(),
+                items: vec![MenuItem::action("Quit Quiet", Quit)],
+                disabled: false,
+            }]);
+        }
 
-        // Starting with Windows is on by default for the installed app, once.
+        // Starting at sign-in is on by default for the installed app, once.
         if !cfg!(debug_assertions) && data::read(cx, |s| s.setting("autostart")).is_none() {
             if let Err(err) = autostart::set_enabled(true) {
                 data::log_error(&err);
@@ -131,19 +159,18 @@ fn main() {
             data::change(cx, |s| s.set_setting("autostart", "1"));
         }
 
-        let (show_tx, show_rx) = async_channel::unbounded();
-        listener.listen(move || {
-            show_tx.send_blocking(()).ok();
+        let (request_tx, request_rx) = async_channel::unbounded();
+        listener.listen(move |request| {
+            request_tx.send_blocking(request).ok();
         });
-        #[cfg(windows)]
-        start_system(cx, show_rx);
-        #[cfg(not(windows))]
-        drop(show_rx);
+        start_system(cx, request_rx);
 
         reminders::start(cx);
 
-        if !background {
-            open_main(cx);
+        match request {
+            Request::Capture => capture::open(cx),
+            Request::Show if !background => open_main(cx),
+            Request::Show => {}
         }
     });
 }

@@ -1,11 +1,11 @@
 [workspace]
-members = ["store"]
+members = ["store", "packaging/icons"]
 
 [package]
 name = "quiet"
 version = "0.1.0"
 edition = "2024"
-description = "A calm to-do app for Windows"
+description = "A calm to-do app"
 publish = false
 
 [dependencies]
@@ -17,18 +17,24 @@ anyhow = "1"
 quiet-store = { path = "store" }
 chrono = "0.4"
 async-channel = "2"
+auto-launch = "0.6.0"
+notify-rust = "4.18.2"
 
 [build-dependencies]
 embed-resource = "3"
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 tray-icon = "0.26.1"
 global-hotkey = "0.9.0"
-auto-launch = "0.6.0"
-notify-rust = "4.18.2"
+
+[target.'cfg(windows)'.dependencies]
 windows-registry = "0.6"
 image = { version = "0.25", default-features = false, features = ["png"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
+# StatusNotifierItem over D-Bus, without GTK. Waybar, KDE and most panels show it.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", default-features = false, features = ["blocking", "async-io"] }
 
 [profile.dev]
 debug = "limited"
