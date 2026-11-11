@@ -364,6 +364,9 @@ pub fn parse_time(text: &str) -> Option<NaiveTime> {
     NaiveTime::from_hms_opt(h, m, 0)
 }
 
+/// How far ahead planning the day looks for tasks with a day.
+pub const PLAN_DAYS_AHEAD: i64 = 7;
+
 pub fn now() -> i64 {
     Local::now().timestamp()
 }
@@ -514,6 +517,38 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(count as usize)
+    }
+
+    /// What planning the day offers, one at a time, in this order: tasks
+    /// whose day is within the coming week (soonest first), each active
+    /// project's next action, then the Inbox (never looked at first). Only
+    /// open tasks that are not in Today yet, each once.
+    pub fn plan_candidates(&self, today: NaiveDate) -> Result<Vec<Task>> {
+        let soon = day_key(today + Duration::days(PLAN_DAYS_AHEAD));
+        let mut tasks = self.query_tasks(
+            "WHERE status = 'open' AND in_today = 0 AND day IS NOT NULL AND day >= ?1 AND day <= ?2
+             ORDER BY day, created_at, id",
+            params![day_key(today), soon],
+        )?;
+        tasks.extend(self.query_tasks(
+            "WHERE status = 'open' AND in_today = 0 AND is_next_action = 1
+               AND project_id IN (SELECT id FROM projects WHERE archived = 0)
+             ORDER BY created_at, id",
+            [],
+        )?);
+        tasks.extend(self.inbox_to_sort()?);
+        let mut seen = std::collections::HashSet::new();
+        tasks.retain(|t| seen.insert(t.id));
+        Ok(tasks)
+    }
+
+    /// Whether the day has been planned (the plan was opened) on `today`.
+    pub fn planned_on(&self, today: NaiveDate) -> Result<bool> {
+        Ok(self.setting("planned_day")?.is_some_and(|d| d == day_key(today)))
+    }
+
+    pub fn mark_planned(&self, today: NaiveDate) -> Result<()> {
+        self.set_setting("planned_day", &day_key(today))
     }
 
     /// Open tasks of a project, the next action first.
@@ -1190,6 +1225,53 @@ mod tests {
         s.update_task(call, &e, day("2026-11-13")).unwrap();
         assert!(s.task(call).unwrap().unwrap().in_today);
         assert_eq!(s.task(call).unwrap().unwrap().day, Some(day("2026-11-13")));
+    }
+
+    #[test]
+    fn plan_candidates_come_in_order() {
+        let s = Store::open_in_memory().unwrap();
+        let today = day(MON);
+        let project = s.add_project("Home", "#5B8DEF").unwrap();
+        let archived = s.add_project("Old", "#5B8DEF").unwrap();
+        s.set_project_archived(archived, true).unwrap();
+
+        let inbox_seen = s.add_task("inbox seen", None, false).unwrap();
+        s.mark_reviewed(inbox_seen).unwrap();
+        s.add_task("inbox new", None, false).unwrap();
+        s.add_task("already today", None, true).unwrap();
+        let next = s.add_task("next action", Some(project), false).unwrap();
+        s.set_next_action(next, true).unwrap();
+        s.add_task("other project task", Some(project), false).unwrap();
+        let old_next = s.add_task("archived next", Some(archived), false).unwrap();
+        s.set_next_action(old_next, true).unwrap();
+
+        let with_day = |title: &str, d: &str| {
+            let id = s.add_task(title, Some(project), false).unwrap();
+            let mut e = edit(&s, id);
+            e.day = Some(day(d));
+            s.update_task(id, &e, today).unwrap();
+            id
+        };
+        with_day("saturday", SAT);
+        with_day("tuesday", TUE);
+        with_day("far away", "2026-12-01");
+        with_day("yesterday", "2026-11-08");
+        // A next action with a day shows once, with the days. (It also
+        // takes over as Home's next action, so "next action" drops out.)
+        let both = with_day("next with day", "2026-11-12");
+        s.set_next_action(both, true).unwrap();
+
+        let titles: Vec<_> = s.plan_candidates(today).unwrap().into_iter().map(|t| t.title).collect();
+        assert_eq!(titles, ["tuesday", "next with day", "saturday", "inbox new", "inbox seen"]);
+    }
+
+    #[test]
+    fn planning_is_once_a_day() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(!s.planned_on(day(MON)).unwrap());
+        s.mark_planned(day(MON)).unwrap();
+        assert!(s.planned_on(day(MON)).unwrap());
+        assert!(!s.planned_on(day(TUE)).unwrap());
     }
 
     #[test]

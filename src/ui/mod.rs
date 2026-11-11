@@ -2,6 +2,7 @@
 
 mod done;
 mod editor;
+mod plan;
 mod projects;
 mod settings;
 mod sort;
@@ -44,6 +45,7 @@ actions!(
         FocusList,
         KeepTask,
         SortInbox,
+        PlanToday,
     ]
 );
 
@@ -65,6 +67,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("e", EditProject, list),
         KeyBinding::new("k", KeepTask, list),
         KeyBinding::new("s", SortInbox, list),
+        KeyBinding::new("p", PlanToday, list),
         KeyBinding::new("delete", DeleteTask, list),
         KeyBinding::new("down", SelectNext, list),
         KeyBinding::new("up", SelectPrev, list),
@@ -150,6 +153,8 @@ pub struct MainView {
     select_project: Option<ProjectId>,
     /// Inbox tasks nobody has sorted yet, for the nudge on Today.
     inbox_unsorted: usize,
+    /// Whether today has been planned, so Today stops offering it.
+    planned_today: bool,
     hotkey_input: Entity<InputState>,
     settings_note: Option<SharedString>,
     autostart: bool,
@@ -198,6 +203,7 @@ impl MainView {
             project_selected: 0,
             project_next: HashMap::new(),
             show_archived: false,
+            planned_today: true,
             layout: Layout::Regular,
             select_project: None,
             inbox_unsorted: 0,
@@ -256,6 +262,7 @@ impl MainView {
             Screen::Projects | Screen::Settings => Vec::new(),
         };
         self.inbox_unsorted = data::read(cx, |s| s.inbox_unsorted_count());
+        self.planned_today = data::read(cx, |s| s.planned_on(today));
         self.done_today = data::read(cx, |s| s.done_on(today));
         self.done_count = self.done_today.len();
         if self.screen != Screen::Today {
@@ -407,6 +414,12 @@ impl MainView {
             && task.carried
         {
             data::change(cx, |s| s.keep_carried(task.id));
+        }
+    }
+
+    fn on_plan_today(&mut self, _: &PlanToday, window: &mut Window, cx: &mut Context<Self>) {
+        if self.screen == Screen::Today {
+            plan::open(window, cx);
         }
     }
 
@@ -566,13 +579,28 @@ impl MainView {
         };
 
         let right = match self.screen {
-            Screen::Today if self.done_count > 0 => Some(
+            Screen::Today => Some(
                 h_flex()
-                    .gap_2()
-                    .text_sm()
-                    .text_color(subtle)
-                    .child(Icon::new(IconName::CircleCheck).small())
-                    .child(format!("{} done today", self.done_count))
+                    .gap_3()
+                    .when(self.done_count > 0, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_2()
+                                .text_sm()
+                                .text_color(subtle)
+                                .child(Icon::new(IconName::CircleCheck).small())
+                                .child(format!("{} done today", self.done_count)),
+                        )
+                    })
+                    .child(
+                        Button::new("plan-today")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Sun)
+                            .label("Plan")
+                            .tooltip("Plan today, one question at a time (P)")
+                            .on_click(cx.listener(|_, _, window, cx| plan::open(window, cx))),
+                    )
                     .into_any_element(),
             ),
             Screen::Inbox if !self.open.iter().all(|t| t.in_today) => Some(
@@ -711,6 +739,22 @@ impl MainView {
                     .when(self.layout == Layout::Regular, |this| this.child(project.name.clone()))
             });
 
+        // The first open task on Today is the one to do now, so starting
+        // needs no decision. Done, the next one takes its place.
+        let is_now = self.screen == Screen::Today && index == 0 && !done && !task.carried;
+        let now_marker = is_now.then(|| {
+            div()
+                .flex_none()
+                .text_xs()
+                .font_semibold()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(cx.theme().foreground)
+                .text_color(cx.theme().background)
+                .child("Now")
+        });
+
         let next_marker = (in_project && task.is_next_action).then(|| {
             div()
                 .flex_none()
@@ -799,11 +843,13 @@ impl MainView {
             .when(selected, |this| this.bg(style::selection(cx)))
             .when(!selected, |this| this.hover(|s| s.bg(cx.theme().list_hover)))
             .child(check)
+            .children(now_marker)
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
+                    .when(is_now, |this| this.font_medium())
                     .when(done && self.screen != Screen::Done, |this| {
                         this.line_through().text_color(style::subtle(cx))
                     })
@@ -862,6 +908,7 @@ impl MainView {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .gap_1()
+            .when(on_today && !self.planned_today, |this| this.child(self.render_plan_nudge(cx)))
             .children(rows)
             .when(empty, |this| {
                 let text = match self.screen {
@@ -910,6 +957,26 @@ impl MainView {
 }
 
 impl MainView {
+    /// The first thing on Today until the day is planned: one line, no
+    /// pop-up.
+    fn render_plan_nudge(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .id("plan-nudge")
+            .gap_3()
+            .mb_2()
+            .px_3()
+            .py_2p5()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().secondary)
+            .cursor_pointer()
+            .hover(|s| s.bg(cx.theme().secondary_hover))
+            .child(Icon::new(IconName::Sun).small())
+            .child(div().flex_1().min_w_0().child("Plan today? A few quick questions."))
+            .child(div().flex_none().text_sm().text_color(style::subtle(cx)).child("P"))
+            .on_click(cx.listener(|_, _, window, cx| plan::open(window, cx)))
+            .into_any_element()
+    }
+
     /// Above the tasks that came along from earlier days: what they are,
     /// and two ways to decide about all of them at once.
     fn render_carried_header(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -997,6 +1064,7 @@ impl Render for MainView {
             .on_action(cx.listener(Self::on_move_down))
             .on_action(cx.listener(Self::on_keep))
             .on_action(cx.listener(Self::on_sort_inbox))
+            .on_action(cx.listener(Self::on_plan_today))
             .on_action(cx.listener(|this, _: &ShowToday, window, cx| this.show(Screen::Today, window, cx)))
             .on_action(cx.listener(|this, _: &ShowInbox, window, cx| this.show(Screen::Inbox, window, cx)))
             .on_action(cx.listener(|this, _: &ShowProjects, window, cx| this.show(Screen::Projects, window, cx)))
@@ -1028,9 +1096,9 @@ impl MainView {
     fn render_hints(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let hints: &[(&str, &str)] = match self.screen {
             Screen::Today if self.open.iter().any(|t| t.carried) => {
-                &[("N", "new"), ("Space", "done"), ("K", "keep"), ("T", "take out"), ("Alt ↑↓", "move")]
+                &[("P", "plan"), ("N", "new"), ("Space", "done"), ("K", "keep"), ("T", "take out")]
             }
-            Screen::Today => &[("N", "new"), ("Enter", "edit"), ("Space", "done"), ("T", "take out"), ("Alt ↑↓", "move")],
+            Screen::Today => &[("P", "plan"), ("N", "new"), ("Space", "done"), ("T", "take out"), ("Alt ↑↓", "move")],
             Screen::Inbox => &[("N", "new"), ("Enter", "edit"), ("Space", "done"), ("T", "today"), ("S", "sort")],
             Screen::Projects => &[("N", "new project"), ("Enter", "open"), ("E", "edit")],
             Screen::Project(_) => &[("N", "new"), ("Space", "done"), ("T", "today"), ("A", "next action"), ("Esc", "back")],
