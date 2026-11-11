@@ -77,12 +77,10 @@ fn show(title: String, body: String, cx: &mut App) {
 #[cfg(windows)]
 fn register_app_id(cx: &mut App) {
     cx.set_app_identity(APP_ID, "Quiet");
+    // Written on every start, so a new icon replaces the old one after an update.
     let icon = data::database_path().with_file_name("quiet.png");
-    if !icon.exists() {
-        let rgba = crate::icon::rgba(128);
-        if let Some(image) = image::RgbaImage::from_raw(128, 128, rgba) {
-            image.save(&icon).ok();
-        }
+    if let Some(image) = image::RgbaImage::from_raw(128, 128, crate::icon::rgba(128)) {
+        image.save(&icon).ok();
     }
     let result = windows_registry::CURRENT_USER
         .create(format!(r"Software\Classes\AppUserModelId\{APP_ID}"))
