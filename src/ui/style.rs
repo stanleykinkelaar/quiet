@@ -1,7 +1,7 @@
 //! Small visual vocabulary shared by every screen.
 
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::{App, Hsla, Rgba, rgb};
+use gpui_kit::{App, Hsla, Pixels, Rgba, Window, px, rgb};
 
 /// Project colours: calm, readable on light and dark, and no red so nothing
 /// ever looks like a warning.
@@ -34,6 +34,13 @@ pub fn selection(cx: &App) -> Hsla {
     } else {
         cx.theme().foreground.opacity(0.07)
     }
+}
+
+/// A dialog's width: `preferred`, or less when the window is narrower, so
+/// it never runs off the edge.
+pub fn dialog_width(preferred: f32, window: &Window) -> Pixels {
+    let room = f32::from(window.viewport_size().width) - 24.;
+    px(preferred.min(room).max(280.))
 }
 
 pub fn subtle(cx: &App) -> Hsla {

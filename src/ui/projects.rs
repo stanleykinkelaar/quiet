@@ -84,12 +84,12 @@ pub fn open_editor(project: &Project, window: &mut Window, cx: &mut App) {
     let editor = cx.new(|cx| ProjectEditor::new(project, window, cx));
     let name = editor.read(cx).name.clone();
     let archived = project.archived;
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let save = editor.clone();
         let archive = editor.clone();
         dialog
             .title("Edit project")
-            .w(px(460.))
+            .w(style::dialog_width(460., window))
             .child(editor.clone())
             .on_ok({
                 let editor = editor.clone();

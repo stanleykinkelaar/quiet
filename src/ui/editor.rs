@@ -15,12 +15,12 @@ use crate::data;
 pub fn open(task: &Task, window: &mut Window, cx: &mut App) {
     let editor = cx.new(|cx| TaskEditor::new(task, window, cx));
     let title = editor.read(cx).title.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, window, _| {
         let save = editor.clone();
         let delete = editor.clone();
         dialog
             .title("Edit task")
-            .w(px(540.))
+            .w(super::style::dialog_width(540., window))
             .child(editor.clone())
             .on_ok({
                 let editor = editor.clone();
@@ -229,17 +229,18 @@ impl Render for TaskEditor {
             .gap_3()
             .child(Input::new(&self.title).large())
             .child(Textarea::new(&self.note))
-            .child(field("Project", Select::new(&self.project).w(px(260.)).into_any_element(), cx))
-            .child(field("Repeat", Select::new(&self.repeat).w(px(260.)).into_any_element(), cx))
+            .child(field("Project", div().max_w(px(260.)).child(Select::new(&self.project).w_full()).into_any_element(), cx))
+            .child(field("Repeat", div().max_w(px(260.)).child(Select::new(&self.repeat).w_full()).into_any_element(), cx))
             .child(field(
                 "Day",
                 v_flex()
                     .gap_1()
                     .child(
                         h_flex()
+                            .flex_wrap()
                             .gap_2()
                             .child(div().w(px(140.)).child(Input::new(&self.day)))
-                            .child(Select::new(&self.lead).w(px(160.))),
+                            .child(div().w(px(160.)).child(Select::new(&self.lead).w_full())),
                     )
                     .child(div().text_xs().text_color(subtle).child(day_hint))
                     .into_any_element(),
@@ -267,11 +268,20 @@ fn lead_label(days: i64) -> String {
     }
 }
 
-/// A quiet label on the left, the control on the right.
+/// A quiet label on the left, the control on the right. The control takes
+/// the room it is given, so it shrinks in a narrow window.
 fn field(label: &'static str, control: AnyElement, cx: &App) -> impl IntoElement {
     h_flex()
         .items_start()
         .gap_4()
-        .child(div().w(px(80.)).pt_1p5().text_sm().text_color(cx.theme().muted_foreground).child(label))
-        .child(control)
+        .child(
+            div()
+                .flex_none()
+                .w(px(80.))
+                .pt_1p5()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(label),
+        )
+        .child(div().flex_1().min_w_0().max_w(px(340.)).child(control))
 }

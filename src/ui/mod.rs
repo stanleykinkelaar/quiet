@@ -154,6 +154,8 @@ pub struct MainView {
     settings_note: Option<SharedString>,
     autostart: bool,
     scroll: ScrollHandle,
+    /// Set at the start of every render from the window width.
+    layout: Layout,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -196,6 +198,7 @@ impl MainView {
             project_selected: 0,
             project_next: HashMap::new(),
             show_archived: false,
+            layout: Layout::Regular,
             select_project: None,
             inbox_unsorted: 0,
             hotkey_input,
@@ -469,31 +472,37 @@ impl MainView {
 
     // ---- rendering ------------------------------------------------------
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A narrow window shows the sidebar as icons only, with the names as
+    /// tooltips.
+    fn render_sidebar(&self, layout: Layout, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.screen.sidebar_slot();
+        let compact = layout == Layout::Compact;
         let item = |id: &'static str, icon: IconName, label: &'static str, screen: Screen, cx: &mut Context<Self>| {
             let active = current == screen;
             h_flex()
                 .id(id)
                 .gap_3()
-                .px_3()
                 .py_2()
+                .when(compact, |this| this.justify_center().tooltip(move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(label).build(window, cx)
+                }))
+                .when(!compact, |this| this.px_3())
                 .rounded(cx.theme().radius)
                 .cursor_pointer()
                 .text_color(if active { cx.theme().foreground } else { style::subtle(cx) })
                 .when(active, |this| this.bg(cx.theme().sidebar_accent))
                 .hover(|this| this.bg(cx.theme().sidebar_accent))
                 .child(Icon::new(icon).small())
-                .child(label)
+                .when(!compact, |this| this.child(label))
                 .on_click(cx.listener(move |this, _, window, cx| this.show(screen, window, cx)))
         };
         v_flex()
-            .w(px(168.))
+            .w(if compact { px(56.) } else { px(168.) })
             .h_full()
             .flex_none()
             .gap_1()
-            .px_3()
-            .pt_8()
+            .when(compact, |this| this.px_2().pt_5())
+            .when(!compact, |this| this.px_3().pt_8())
             .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
@@ -593,7 +602,12 @@ impl MainView {
             _ => None,
         };
 
-        h_flex().items_end().justify_between().child(left).children(right)
+        h_flex()
+            .items_end()
+            .justify_between()
+            .gap_3()
+            .child(left.flex_1().min_w_0())
+            .children(right.map(|right| div().flex_none().child(right)))
     }
 
     pub(super) fn render_row(&self, task: &Task, index: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -693,7 +707,8 @@ impl MainView {
                     .text_xs()
                     .text_color(cx.theme().foreground.opacity(0.8))
                     .child(div().size(px(7.)).rounded_full().bg(color))
-                    .child(project.name.clone())
+                    // Narrow: the coloured dot alone, so the title keeps its room.
+                    .when(self.layout == Layout::Regular, |this| this.child(project.name.clone()))
             });
 
         let next_marker = (in_project && task.is_next_action).then(|| {
@@ -935,8 +950,27 @@ impl MainView {
     }
 }
 
+/// How much room the window gives. Below the breakpoint the sidebar folds to
+/// icons and the margins shrink, so Quiet still works as a narrow side window.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Layout {
+    Compact,
+    Regular,
+}
+
+impl Layout {
+    const BREAKPOINT: Pixels = px(640.);
+
+    pub(super) fn for_width(width: Pixels) -> Self {
+        if width < Self::BREAKPOINT { Self::Compact } else { Self::Regular }
+    }
+}
+
 impl Render for MainView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let layout = Layout::for_width(window.viewport_size().width);
+        self.layout = layout;
+        let compact = layout == Layout::Compact;
         let body = match self.screen {
             Screen::Projects => self.render_projects(cx).into_any_element(),
             Screen::Settings => self.render_settings(cx).into_any_element(),
@@ -970,17 +1004,16 @@ impl Render for MainView {
             .on_action(cx.listener(|this, _: &ShowDone, window, cx| this.show(Screen::Done, window, cx)))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_sidebar(cx))
+            .child(self.render_sidebar(layout, cx))
             .child(
-                h_flex().flex_1().h_full().justify_center().child(
+                h_flex().flex_1().min_w_0().h_full().justify_center().child(
                     v_flex()
                         .w_full()
                         .max_w(px(680.))
                         .h_full()
-                        .px_8()
-                        .pt_8()
+                        .when(compact, |this| this.px_4().pt_5().gap_4())
+                        .when(!compact, |this| this.px_8().pt_8().gap_5())
                         .pb_4()
-                        .gap_5()
                         .child(self.render_header(cx))
                         .when(show_add, |this| this.child(Input::new(&self.add_input).large()))
                         .child(body)
@@ -1007,7 +1040,9 @@ impl MainView {
         let subtle = style::subtle(cx).opacity(0.8);
         h_flex()
             .flex_none()
-            .gap_4()
+            .flex_wrap()
+            .gap_x_4()
+            .gap_y_1()
             .pt_2()
             .text_xs()
             .text_color(subtle)

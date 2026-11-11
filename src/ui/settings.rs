@@ -41,7 +41,7 @@ impl MainView {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().w(px(260.)).child(Input::new(&self.hotkey_input)))
+                    .child(div().flex_1().min_w_0().max_w(px(260.)).child(Input::new(&self.hotkey_input)))
                     .child(
                         Button::new("apply-hotkey")
                             .label("Save")
