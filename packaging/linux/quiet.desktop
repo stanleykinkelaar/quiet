@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Quiet
+Comment=A calm to-do list
+Exec=quiet
+Icon=quiet
+Terminal=false
+Categories=Office;ProjectManagement;
+Keywords=todo;tasks;inbox;
+StartupWMClass=quiet
+Actions=capture;
+
+[Desktop Action capture]
+Name=Quick capture
+Exec=quiet --capture

@@ -3,7 +3,10 @@
 ; Inno Setup 6:  "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\quiet.iss
 
 #define AppName "Quiet"
-#define AppVersion "0.1.0"
+; The release workflow passes /DAppVersion=x.y.z from Cargo.toml.
+#ifndef AppVersion
+  #define AppVersion "0.1.0"
+#endif
 #define AppExe "quiet.exe"
 
 [Setup]
