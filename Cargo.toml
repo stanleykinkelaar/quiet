@@ -1,0 +1,47 @@
+[workspace]
+members = ["store"]
+
+[package]
+name = "quiet"
+version = "0.1.0"
+edition = "2024"
+description = "A calm to-do app for Windows"
+publish = false
+
+[dependencies]
+# gpui-kit is Longbridge's umbrella crate that ships gpui-component.
+# It pins the exact GPUI snapshot (gpui-pre =0.3.12) that 0.9.1 was built
+# against, so both are pinned here together.
+gpui-kit = "=0.9.1"
+anyhow = "1"
+quiet-store = { path = "store" }
+chrono = "0.4"
+async-channel = "2"
+
+[build-dependencies]
+embed-resource = "3"
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26.1"
+global-hotkey = "0.9.0"
+auto-launch = "0.6.0"
+notify-rust = "4.18.2"
+windows-registry = "0.6"
+image = { version = "0.25", default-features = false, features = ["png"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
+[profile.dev]
+debug = "limited"
+
+# GPUI renders noticeably faster with these optimised even in debug builds.
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+gpui-pre-windows = { opt-level = 3 }
+taffy = { opt-level = 3 }
+resvg = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+
+[profile.release]
+strip = "symbols"
