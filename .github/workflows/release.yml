@@ -144,6 +144,10 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # The in-app updater refuses a download whose checksum is not listed here.
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum QuietSetup.exe Quiet-macos.zip quiet-linux-x86_64.tar.gz | tee SHA256SUMS
       # Asset names carry no version, so .../releases/latest/download/<name>
       # always points at the newest build. The install scripts rely on that.
       - uses: softprops/action-gh-release@v3
@@ -156,3 +160,4 @@ jobs:
             dist/QuietSetup.exe
             dist/Quiet-macos.zip
             dist/quiet-linux-x86_64.tar.gz
+            dist/SHA256SUMS

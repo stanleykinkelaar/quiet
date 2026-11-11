@@ -1,8 +1,6 @@
-//! Settings: the capture shortcut and starting at sign-in. Nothing more.
+//! Settings: the capture shortcut, starting at sign-in and updates.
 
-#[cfg(not(target_os = "linux"))]
-use gpui_kit::component::button::Button;
-#[cfg(not(target_os = "linux"))]
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::h_flex;
 #[cfg(not(target_os = "linux"))]
 use gpui_kit::component::input::Input;
@@ -12,6 +10,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{MainView, style};
+use crate::update::{self, State};
 use crate::{data, platform};
 
 pub const DEFAULT_HOTKEY: &str = "Ctrl+Alt+Space";
@@ -77,9 +76,42 @@ impl MainView {
             .into_any_element()
     }
 
+    /// The version, and a button that checks for a newer one. Quiet only
+    /// goes online when it is pressed.
+    fn render_update(&self, cx: &mut Context<Self>) -> AnyElement {
+        let subtle = style::subtle(cx);
+        if let Some(reason) = update::unsupported() {
+            return div().text_sm().text_color(subtle).child(reason).into_any_element();
+        }
+        let state = update::state(cx);
+        let note: Option<SharedString> = match &state {
+            State::Idle | State::Checking => None,
+            State::UpToDate => Some("You have the newest version.".into()),
+            State::Available(version) => Some(format!("Quiet {version} is available.").into()),
+            State::Installing(version) => {
+                Some(format!("Downloading Quiet {version}. Quiet restarts by itself when it is done.").into())
+            }
+            State::Failed(message) => Some(message.clone()),
+        };
+        let button = match state {
+            State::Available(version) => Button::new("install-update")
+                .primary()
+                .label(format!("Install {version}"))
+                .on_click(move |_, _, cx| update::install(version.clone(), cx)),
+            State::Installing(_) => Button::new("install-update").label("Installing").loading(true),
+            State::Checking => Button::new("check-update").label("Checking").loading(true),
+            _ => Button::new("check-update").label("Check for updates").on_click(|_, _, cx| update::check(cx)),
+        };
+        v_flex()
+            .gap_2()
+            .child(h_flex().child(button))
+            .children(note.map(|note| div().text_sm().text_color(subtle).child(note)))
+            .into_any_element()
+    }
+
     pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let subtle = style::subtle(cx);
-        let section = |title: &'static str, caption: &'static str, control: AnyElement| {
+        let section = |title: &'static str, caption: SharedString, control: AnyElement| {
             v_flex()
                 .gap_2()
                 .child(div().text_base().child(title))
@@ -91,12 +123,12 @@ impl MainView {
             .pt_2()
             .child(section(
                 "Quick capture shortcut",
-                "Opens a small window from anywhere. Type, press Enter, and it lands in your Inbox.",
+                "Opens a small window from anywhere. Type, press Enter, and it lands in your Inbox.".into(),
                 self.render_hotkey(cx),
             ))
             .child(section(
                 platform::AUTOSTART_TITLE,
-                platform::AUTOSTART_CAPTION,
+                platform::AUTOSTART_CAPTION.into(),
                 Switch::new("autostart")
                     .checked(self.autostart)
                     .label(if self.autostart { "On" } else { "Off" })
@@ -110,10 +142,15 @@ impl MainView {
                     }))
                     .into_any_element(),
             ))
+            .child(section(
+                "Updates",
+                format!("You have Quiet {}. Quiet only goes online when you check.", update::CURRENT).into(),
+                self.render_update(cx),
+            ))
             .when(!platform::notifications_enabled(), |this| {
                 this.child(section(
                     "Reminders",
-                    "Windows notifications are switched off, so reminders cannot ring. You can turn them on in Windows Settings, System, Notifications.",
+                    "Windows notifications are switched off, so reminders cannot ring. You can turn them on in Windows Settings, System, Notifications.".into(),
                     div().into_any_element(),
                 ))
             })

@@ -6,7 +6,7 @@ A small, calm to-do app for Windows, macOS and Linux. It is built around what it
 
 Quiet has an Inbox, a few flat projects, a Today list you pick yourself, and a Done list that shows what you finished. There are no priorities, due dates, labels, overdue warnings or counters (apart from "done today").
 
-Pure Rust: GPUI and gpui-component for the interface, SQLite (bundled) for storage. No accounts, no network, no telemetry.
+Pure Rust: GPUI and gpui-component for the interface, SQLite (bundled) for storage. No accounts, no telemetry. Quiet goes online only when you press Check for updates in Settings.
 
 ## Install
 
@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/stanleykinkelaar/Quiet/main/install
 irm https://raw.githubusercontent.com/stanleykinkelaar/Quiet/main/install.ps1 | iex
 ```
 
-Run the same command again to update. Nothing needs admin rights. You can also download the files yourself from the [latest release](https://github.com/stanleykinkelaar/Quiet/releases/latest).
+To update, open Settings and press Check for updates. Quiet downloads the new version, checks it against the release's checksums, installs it and starts again. Running the install command again works too. Nothing needs admin rights. You can also download the files yourself from the [latest release](https://github.com/stanleykinkelaar/Quiet/releases/latest).
 
 What goes where:
 
@@ -166,7 +166,7 @@ Releases are automatic. Every push to `main` builds Windows, macOS and Linux on 
 
 The version is bumped only after all three builds succeed, by a `chore(release): vX.Y.Z` commit on `main` made by GitHub Actions. Pull before you push your next change. To jump to a version yourself (for example 1.0.0), set it in `Cargo.toml`; a higher version there wins.
 
-The release gets `QuietSetup.exe`, `Quiet-macos.zip` (a universal app) and `quiet-linux-x86_64.tar.gz`. The names carry no version, so the install scripts always fetch the newest one. Builds that do not release are still downloadable as workflow artifacts from the run's page. Pull requests are build checked by `.github/workflows/ci.yml`.
+The release gets `QuietSetup.exe`, `Quiet-macos.zip` (a universal app), `quiet-linux-x86_64.tar.gz` and `SHA256SUMS`, which the in-app updater checks every download against. The names carry no version, so the install scripts always fetch the newest one. Builds that do not release are still downloadable as workflow artifacts from the run's page. Pull requests are build checked by `.github/workflows/ci.yml`.
 
 ## Project layout
 
@@ -178,6 +178,7 @@ src/capture.rs    the quick capture window
 src/system.rs     tray icon and global hotkey (per system)
 src/reminders.rs  the once a day rollover and reminder notifications
 src/platform.rs   single instance, start at sign-in, notification check
+src/update.rs     check for updates, download, verify and install from Settings
 build.rs          draws the app icon into the Windows exe
 installer/        Inno Setup script (Windows)
 packaging/        icon tool, macOS bundle script, Linux tarball and .desktop file
