@@ -30,11 +30,11 @@ runs:
           libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev
           libwayland-dev libfreetype-dev libfontconfig-dev libvulkan-dev
       run: |
-        # The runner's apt mirrors sometimes stop resolving for hours. Without
-        # limits apt then hangs for many minutes, so every call gets a hard
-        # time limit, and a failed attempt moves on to the next mirror.
+        # The runner's apt mirrors sometimes stop resolving for hours, and apt
+        # then hangs for minutes on each one. So every mirror is first probed
+        # with a short request, and apt only gets a mirror that answered.
         apt_get() {
-          sudo timeout 60 apt-get \
+          sudo timeout 90 apt-get \
             -o Acquire::Retries=1 \
             -o Acquire::http::Timeout=15 \
             -o Acquire::https::Timeout=15 \
@@ -52,21 +52,29 @@ runs:
         }
 
         mirrors=/etc/apt/apt-mirrors.txt
+        codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
         downloaded=false
-        # First the runner's own mirror list, then two mirrors on other domains.
-        for mirror in default \
-          https://archive.ubuntu.com/ubuntu/ \
-          https://mirrors.edge.kernel.org/ubuntu/; do
-          if [ "$mirror" != default ]; then
-            [ -f "$mirrors" ] || continue
-            echo "Trying $mirror"
+
+        if [ -f "$mirrors" ]; then
+          for mirror in \
+            http://azure.archive.ubuntu.com/ubuntu/ \
+            https://archive.ubuntu.com/ubuntu/ \
+            https://mirrors.edge.kernel.org/ubuntu/; do
+            if ! curl -fsS --max-time 8 -o /dev/null "${mirror}dists/${codename}/InRelease"; then
+              echo "Skipping $mirror, it does not answer."
+              continue
+            fi
+            echo "Using $mirror"
             echo "$mirror" | sudo tee "$mirrors" > /dev/null
-          fi
-          if download; then
-            downloaded=true
-            break
-          fi
-        done
+            if download; then
+              downloaded=true
+              break
+            fi
+          done
+        elif download; then
+          # A runner without the mirror list file: use apt as it is set up.
+          downloaded=true
+        fi
 
         if [ "$downloaded" != true ]; then
           echo "::error::Could not download the Linux build dependencies from any mirror."
