@@ -4,6 +4,7 @@ mod done;
 mod editor;
 mod projects;
 mod settings;
+mod sort;
 mod style;
 
 pub use settings::saved_hotkey;
@@ -41,12 +42,16 @@ actions!(
         ShowSettings,
         GoBack,
         FocusList,
+        KeepTask,
+        SortInbox,
     ]
 );
 
 const CONTEXT: &str = "Quiet";
 /// Today stays calm at five. More is allowed, with a gentle note.
 const TODAY_SOFT_LIMIT: usize = 5;
+/// Past this many unsorted Inbox tasks, Today offers one line to sort them.
+const INBOX_NUDGE: usize = 10;
 
 pub fn bind_keys(cx: &mut App) {
     // Single keys only act when no text field has focus.
@@ -58,6 +63,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("t", ToggleToday, list),
         KeyBinding::new("a", ToggleNextAction, list),
         KeyBinding::new("e", EditProject, list),
+        KeyBinding::new("k", KeepTask, list),
+        KeyBinding::new("s", SortInbox, list),
         KeyBinding::new("delete", DeleteTask, list),
         KeyBinding::new("down", SelectNext, list),
         KeyBinding::new("up", SelectPrev, list),
@@ -141,6 +148,8 @@ pub struct MainView {
     project_next: HashMap<ProjectId, String>,
     show_archived: bool,
     select_project: Option<ProjectId>,
+    /// Inbox tasks nobody has sorted yet, for the nudge on Today.
+    inbox_unsorted: usize,
     hotkey_input: Entity<InputState>,
     settings_note: Option<SharedString>,
     autostart: bool,
@@ -188,6 +197,7 @@ impl MainView {
             project_next: HashMap::new(),
             show_archived: false,
             select_project: None,
+            inbox_unsorted: 0,
             hotkey_input,
             settings_note: None,
             autostart: crate::platform::autostart::is_enabled(),
@@ -242,6 +252,7 @@ impl MainView {
             }
             Screen::Projects | Screen::Settings => Vec::new(),
         };
+        self.inbox_unsorted = data::read(cx, |s| s.inbox_unsorted_count());
         self.done_today = data::read(cx, |s| s.done_on(today));
         self.done_count = self.done_today.len();
         if self.screen != Screen::Today {
@@ -385,6 +396,20 @@ impl MainView {
             && !task.is_done()
         {
             data::change(cx, |s| s.set_next_action(task.id, !task.is_next_action));
+        }
+    }
+
+    fn on_keep(&mut self, _: &KeepTask, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(task) = self.selected_task().cloned()
+            && task.carried
+        {
+            data::change(cx, |s| s.keep_carried(task.id));
+        }
+    }
+
+    fn on_sort_inbox(&mut self, _: &SortInbox, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.screen, Screen::Inbox | Screen::Today) {
+            sort::open(window, cx);
         }
     }
 
@@ -541,6 +566,16 @@ impl MainView {
                     .child(format!("{} done today", self.done_count))
                     .into_any_element(),
             ),
+            Screen::Inbox if !self.open.iter().all(|t| t.in_today) => Some(
+                Button::new("sort-inbox")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Inbox)
+                    .label("Sort")
+                    .tooltip("Decide on each task, one at a time (S)")
+                    .on_click(cx.listener(|_, _, window, cx| sort::open(window, cx)))
+                    .into_any_element(),
+            ),
             Screen::Project(id) => Some(
                 Button::new("edit-project")
                     .ghost()
@@ -594,25 +629,53 @@ impl MainView {
                 })
             });
 
-        // Quiet hints that a task repeats, has a reminder or a note.
-        let details = (!done && (task.repeat != quiet_store::Repeat::Never || task.reminder.is_some() || task.note.is_some()))
-            .then(|| {
-                h_flex()
-                    .flex_none()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(style::subtle(cx))
-                    .when(task.note.is_some(), |this| this.child(Icon::new(IconName::FileText).xsmall()))
-                    .when(task.repeat != quiet_store::Repeat::Never, |this| {
-                        this.child(Icon::new(IconName::RefreshCw).xsmall())
-                    })
-                    .children(task.reminder.map(|time| {
-                        h_flex()
-                            .gap_1()
-                            .child(Icon::new(IconName::Bell).xsmall())
-                            .child(time.format("%H:%M").to_string())
-                    }))
-            });
+        // Quiet hints that a task repeats, has a day, a reminder or a note.
+        let has_details = task.repeat != quiet_store::Repeat::Never
+            || task.reminder.is_some()
+            || task.note.is_some()
+            || task.day.is_some();
+        let details = (!done && has_details).then(|| {
+            let today = data::today();
+            h_flex()
+                .flex_none()
+                .gap_2()
+                .text_xs()
+                .text_color(style::subtle(cx))
+                .when(task.note.is_some(), |this| this.child(Icon::new(IconName::FileText).xsmall()))
+                .when(task.repeat != quiet_store::Repeat::Never, |this| {
+                    this.child(Icon::new(IconName::RefreshCw).xsmall())
+                })
+                .children(task.day.filter(|d| *d != today || self.screen != Screen::Today).map(|d| {
+                    h_flex()
+                        .gap_1()
+                        .child(Icon::new(IconName::Calendar).xsmall())
+                        .child(day_chip(d, today))
+                }))
+                .children(task.reminder.map(|time| {
+                    // A reminder that rang (or was missed) and got no reaction
+                    // stays visible until you click it or finish the task.
+                    let open = task.reminder_open;
+                    h_flex()
+                        .id(("bell", id as u64))
+                        .gap_1()
+                        .when(open, |this| {
+                            this.px_1p5()
+                                .rounded_full()
+                                .bg(cx.theme().secondary)
+                                .text_color(cx.theme().foreground)
+                                .cursor_pointer()
+                                .tooltip(|window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new("Reminder rang. Click to clear").build(window, cx)
+                                })
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    data::change(cx, |s| s.acknowledge_reminder(id));
+                                }))
+                        })
+                        .child(Icon::new(IconName::Bell).xsmall())
+                        .child(time.format("%H:%M").to_string())
+                }))
+        });
 
         // A small coloured tag naming the project, on Today only.
         let tag = matches!(self.screen, Screen::Today | Screen::Done)
@@ -670,6 +733,18 @@ impl MainView {
                 })
         });
 
+        let keep = (self.screen == Screen::Today && task.carried && !done).then(|| {
+            Button::new(("keep", id as u64))
+                .ghost()
+                .small()
+                .label("Keep")
+                .tooltip("Keep it in Today (K)")
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.stop_propagation();
+                    data::change(cx, |s| s.keep_carried(id));
+                }))
+        });
+
         let next_toggle = (in_project && !done).then(|| {
             Button::new(("next", id as u64))
                 .ghost()
@@ -722,6 +797,7 @@ impl MainView {
             .children(details)
             .children(next_marker)
             .children(tag)
+            .children(keep)
             .children(next_toggle)
             .children(today_toggle)
             .child(delete)
@@ -753,7 +829,12 @@ impl MainView {
 
     fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows: Vec<AnyElement> = Vec::new();
+        let on_today = self.screen == Screen::Today;
         for (index, task) in self.open.iter().enumerate() {
+            let first_carried = on_today && task.carried && !self.open[..index].iter().any(|t| t.carried);
+            if first_carried {
+                rows.push(self.render_carried_header(cx));
+            }
             rows.push(self.render_row(task, index, cx));
         }
         let empty = self.open.is_empty();
@@ -785,6 +866,20 @@ impl MainView {
                         .child("That is more than five. It is fine, and you can always move some back with T."),
                 )
             })
+            .when(on_today && self.inbox_unsorted >= INBOX_NUDGE, |this| {
+                this.child(
+                    div()
+                        .id("inbox-nudge")
+                        .px_3()
+                        .pt_3()
+                        .text_sm()
+                        .text_color(style::subtle(cx))
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(cx.theme().foreground))
+                        .child(format!("{} things in your Inbox. Sort them? (S)", self.inbox_unsorted))
+                        .on_click(cx.listener(|_, _, window, cx| sort::open(window, cx))),
+                )
+            })
             .when(!self.done_today.is_empty(), |this| {
                 let offset = self.open.len();
                 let done_rows: Vec<AnyElement> = self
@@ -796,6 +891,47 @@ impl MainView {
                 this.child(div().pt_6().pb_1().px_3().text_sm().text_color(style::subtle(cx)).child("Done today"))
                     .children(done_rows)
             })
+    }
+}
+
+impl MainView {
+    /// Above the tasks that came along from earlier days: what they are,
+    /// and two ways to decide about all of them at once.
+    fn render_carried_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .pt_6()
+            .pb_1()
+            .px_3()
+            .justify_between()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(style::subtle(cx))
+                    .child("From earlier. Keep them for today, or send them back with T."),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("keep-all")
+                            .ghost()
+                            .xsmall()
+                            .label("Keep all")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                data::change(cx, |s| s.settle_carried(true));
+                            })),
+                    )
+                    .child(
+                        Button::new("send-back-all")
+                            .ghost()
+                            .xsmall()
+                            .label("Send all back")
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                data::change(cx, |s| s.settle_carried(false));
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
@@ -825,6 +961,8 @@ impl Render for MainView {
             .on_action(cx.listener(Self::on_back))
             .on_action(cx.listener(Self::on_move_up))
             .on_action(cx.listener(Self::on_move_down))
+            .on_action(cx.listener(Self::on_keep))
+            .on_action(cx.listener(Self::on_sort_inbox))
             .on_action(cx.listener(|this, _: &ShowToday, window, cx| this.show(Screen::Today, window, cx)))
             .on_action(cx.listener(|this, _: &ShowInbox, window, cx| this.show(Screen::Inbox, window, cx)))
             .on_action(cx.listener(|this, _: &ShowProjects, window, cx| this.show(Screen::Projects, window, cx)))
@@ -856,8 +994,11 @@ impl MainView {
     /// One muted line with the keys that matter on this screen.
     fn render_hints(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let hints: &[(&str, &str)] = match self.screen {
+            Screen::Today if self.open.iter().any(|t| t.carried) => {
+                &[("N", "new"), ("Space", "done"), ("K", "keep"), ("T", "take out"), ("Alt ↑↓", "move")]
+            }
             Screen::Today => &[("N", "new"), ("Enter", "edit"), ("Space", "done"), ("T", "take out"), ("Alt ↑↓", "move")],
-            Screen::Inbox => &[("N", "new"), ("Enter", "edit"), ("Space", "done"), ("T", "today"), ("Del", "delete")],
+            Screen::Inbox => &[("N", "new"), ("Enter", "edit"), ("Space", "done"), ("T", "today"), ("S", "sort")],
             Screen::Projects => &[("N", "new project"), ("Enter", "open"), ("E", "edit")],
             Screen::Project(_) => &[("N", "new"), ("Space", "done"), ("T", "today"), ("A", "next action"), ("Esc", "back")],
             Screen::Done => &[("Space", "not done after all")],
@@ -907,6 +1048,25 @@ fn delete_task(id: TaskId, window: &mut Window, cx: &mut App) {
             .autohide(true),
         cx,
     );
+}
+
+/// A task's day, said the way people say it: Today, Tomorrow, the weekday
+/// within a week, otherwise "14 Nov". Past days read the same, never red.
+fn day_chip(day: chrono::NaiveDate, today: chrono::NaiveDate) -> String {
+    match (day - today).num_days() {
+        0 => "Today".into(),
+        1 => "Tomorrow".into(),
+        -1 => "Yesterday".into(),
+        2..=6 => quiet_store::weekday_name(day.weekday()).into(),
+        _ => {
+            let month = &month_name(day.month())[..3];
+            if day.year() == today.year() {
+                format!("{} {month}", day.day())
+            } else {
+                format!("{} {month} {}", day.day(), day.year())
+            }
+        }
+    }
 }
 
 fn month_name(month: u32) -> &'static str {
