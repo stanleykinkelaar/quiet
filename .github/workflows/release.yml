@@ -31,13 +31,13 @@ jobs:
       release: ${{ steps.next.outputs.release }}
       version: ${{ steps.next.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: next
         run: .github/scripts/next-version.sh "$RUNNER_TEMP/notes.md" | tee -a "$GITHUB_OUTPUT"
       - if: steps.next.outputs.release == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: notes
           path: ${{ runner.temp }}/notes.md
@@ -46,7 +46,7 @@ jobs:
     needs: version
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
@@ -59,7 +59,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target\installer\QuietSetup-${{ needs.version.outputs.version }}.exe dist\QuietSetup.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: dist/*
@@ -68,7 +68,7 @@ jobs:
     needs: version
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -83,7 +83,7 @@ jobs:
           cargo run --release --locked -p quiet-icons -- target/icons
           packaging/macos/bundle.sh target/quiet target/icons \
             ${{ needs.version.outputs.version }} dist/Quiet-macos.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: dist/*
@@ -93,7 +93,7 @@ jobs:
     # The oldest supported runner, so the binary runs on older glibc too.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install GPUI's build dependencies
         run: |
           sudo apt-get update
@@ -108,7 +108,7 @@ jobs:
         run: |
           cargo run --release --locked -p quiet-icons -- target/icons
           packaging/linux/package.sh target/release/quiet target/icons dist/quiet-linux-x86_64.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: dist/*
@@ -124,7 +124,7 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Bump, commit and tag
         run: |
           git config user.name "github-actions[bot]"
@@ -140,13 +140,13 @@ jobs:
           # run (queued behind this one) releases everything together.
           # Pushes made with GITHUB_TOKEN do not start new workflow runs.
           git push --atomic origin HEAD:main "v$VERSION"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
       # Asset names carry no version, so .../releases/latest/download/<name>
       # always points at the newest build. The install scripts rely on that.
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ env.VERSION }}
           name: Quiet ${{ env.VERSION }}
