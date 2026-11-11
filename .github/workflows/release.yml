@@ -95,16 +95,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install GPUI's build dependencies
-        run: |
-          # The runner's first apt mirror, azure.archive.ubuntu.com, sometimes
-          # stops resolving for hours. Drop it so apt uses archive.ubuntu.com.
-          if [ -f /etc/apt/apt-mirrors.txt ]; then
-            sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
-          fi
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
-            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev \
-            libwayland-dev libfreetype-dev libfontconfig-dev libvulkan-dev
+        timeout-minutes: 8
+        uses: ./.github/actions/linux-deps
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked -p quiet-store

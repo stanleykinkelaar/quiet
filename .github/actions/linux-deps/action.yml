@@ -1,0 +1,103 @@
+name: Install GPUI's Linux build dependencies
+description: >
+  Installs the system libraries GPUI links against. The packages are kept in
+  the Actions cache, so a normal run installs them in seconds without touching
+  the network. Only the first run on a new runner image downloads them.
+
+runs:
+  using: composite
+  steps:
+    # The cached packages only fit the runner image they were downloaded for,
+    # so the image version is part of the cache key.
+    - name: Read the runner image version
+      id: image
+      shell: bash
+      run: echo "version=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore the cached packages
+      id: cache
+      uses: actions/cache@v6
+      with:
+        path: /tmp/linux-deps
+        key: linux-deps-${{ steps.image.outputs.version }}-${{ hashFiles('.github/actions/linux-deps/action.yml') }}
+
+    - name: Download the packages
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        DEBS: /tmp/linux-deps
+        PACKAGES: >-
+          libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev
+          libwayland-dev libfreetype-dev libfontconfig-dev libvulkan-dev
+      run: |
+        # The runner's apt mirrors sometimes stop resolving for hours, and apt
+        # then hangs for minutes on each one. So every mirror is first probed
+        # with a short request, and apt only gets a mirror that answered.
+        apt_get() {
+          sudo timeout 90 apt-get \
+            -o Acquire::Retries=1 \
+            -o Acquire::http::Timeout=15 \
+            -o Acquire::https::Timeout=15 \
+            "$@"
+        }
+
+        download() {
+          sudo rm -rf "$DEBS"
+          sudo mkdir -p "$DEBS/partial"
+          # A failed update is fine when the package lists that ship with the
+          # runner image are still good enough to find the packages.
+          apt_get update || true
+          apt_get install --download-only -y --no-install-recommends \
+            -o Dir::Cache::archives="$DEBS" $PACKAGES
+        }
+
+        mirrors=/etc/apt/apt-mirrors.txt
+        codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+        downloaded=false
+
+        if [ -f "$mirrors" ]; then
+          for mirror in \
+            http://azure.archive.ubuntu.com/ubuntu/ \
+            https://archive.ubuntu.com/ubuntu/ \
+            https://mirrors.edge.kernel.org/ubuntu/; do
+            if ! curl -fsS --max-time 8 -o /dev/null "${mirror}dists/${codename}/InRelease"; then
+              echo "Skipping $mirror, it does not answer."
+              continue
+            fi
+            echo "Using $mirror"
+            echo "$mirror" | sudo tee "$mirrors" > /dev/null
+            if download; then
+              downloaded=true
+              break
+            fi
+          done
+        elif download; then
+          # A runner without the mirror list file: use apt as it is set up.
+          downloaded=true
+        fi
+
+        if [ "$downloaded" != true ]; then
+          echo "::error::Could not download the Linux build dependencies from any mirror."
+          exit 1
+        fi
+
+        # Keep only the packages, readable by the cache step.
+        sudo rm -rf "$DEBS/partial" "$DEBS/lock"
+        sudo chown -R "$(id -u):$(id -g)" "$DEBS"
+
+    - name: Install the packages
+      shell: bash
+      env:
+        DEBS: /tmp/linux-deps
+      run: |
+        shopt -s nullglob
+        debs=("$DEBS"/*.deb)
+        if [ "${#debs[@]}" -gt 0 ]; then
+          # apt gets the packages as local files and also finds them in its
+          # download folder, so it installs them without using the network.
+          sudo mkdir -p "$DEBS/partial"
+          sudo timeout 120 apt-get install -y --no-install-recommends \
+            -o Dir::Cache::archives="$DEBS" "${debs[@]}"
+          # Leave only the packages behind, so the cache step can save them.
+          sudo rm -rf "$DEBS/partial" "$DEBS/lock"
+        fi
