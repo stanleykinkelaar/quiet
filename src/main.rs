@@ -7,6 +7,7 @@ mod platform;
 mod reminders;
 mod system;
 mod ui;
+mod update;
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
@@ -135,6 +136,7 @@ fn main() {
         Theme::change(ThemeMode::Light, None, cx);
         cx.set_quit_mode(QuitMode::Explicit);
         data::init(store, cx);
+        update::init(cx);
         cx.set_global(MainWindow(None));
         ui::bind_keys(cx);
         capture::bind_keys(cx);

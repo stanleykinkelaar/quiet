@@ -164,6 +164,7 @@ impl MainView {
                 }
             }),
             cx.observe_global::<data::Data>(|this, cx| this.reload(cx)),
+            cx.observe_global::<crate::update::Updater>(|_, cx| cx.notify()),
             cx.subscribe_in(&hotkey_input, window, |this, _, event, _, cx| {
                 if let InputEvent::PressEnter { .. } = event {
                     this.apply_hotkey(cx);
