@@ -376,6 +376,26 @@ pub fn day_arrives(day: NaiveDate, lead_days: i64, today: NaiveDate) -> bool {
     day - Duration::days(lead_days.max(0)) <= today
 }
 
+/// The database was made by a newer Quiet, with a schema this version
+/// does not know. Opening it is refused, so nothing gets damaged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewerDatabase {
+    pub found: i64,
+    pub known: i64,
+}
+
+impl std::fmt::Display for NewerDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this list was saved by a newer version of Quiet (schema {}, this version knows up to {})",
+            self.found, self.known
+        )
+    }
+}
+
+impl std::error::Error for NewerDatabase {}
+
 /// How many copies from before a database change are kept.
 pub const KEEP_BACKUPS: usize = 3;
 
@@ -416,17 +436,27 @@ fn backup(conn: &Connection, db_path: &Path, version: i64, at: NaiveDateTime) ->
     Ok(target)
 }
 
+fn check_not_newer(version: i64) -> Result<()> {
+    let known = MIGRATIONS.len() as i64;
+    if version > known {
+        return Err(NewerDatabase { found: version, known }.into());
+    }
+    Ok(())
+}
+
 impl Store {
     /// Opens (or creates) the database at `path`. Before an existing
     /// database is changed to a newer schema, a copy of it goes into
     /// `backup_dir`. If that copy cannot be made, nothing is changed and
-    /// this fails.
+    /// this fails. A database from a newer Quiet fails with
+    /// `NewerDatabase`, untouched.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        check_not_newer(version)?;
         if version > 0 && (version as usize) < MIGRATIONS.len() {
             backup(&conn, path, version, Local::now().naive_local())?;
         }
@@ -447,6 +477,7 @@ impl Store {
 
     fn migrate(&self) -> Result<()> {
         let version: i64 = self.conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        check_not_newer(version)?;
         for (index, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute_batch(sql)?;
@@ -1630,6 +1661,29 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
         assert_eq!(version, 1, "left as it was");
+    }
+
+    #[test]
+    fn a_database_from_a_newer_quiet_is_left_alone() {
+        let dir = TempDir::new("newer");
+        let path = dir.0.join("quiet.db");
+        drop(Store::open(&path).unwrap());
+        let newer = MIGRATIONS.len() as i64 + 1;
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE from_the_future (x INTEGER)").unwrap();
+            conn.pragma_update(None, "user_version", newer).unwrap();
+        }
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let err = Store::open(&path).err().expect("refused");
+        let found = err.downcast_ref::<NewerDatabase>().expect("a NewerDatabase error");
+        assert_eq!(*found, NewerDatabase { found: newer, known: MIGRATIONS.len() as i64 });
+        assert!(backups_of(&path).is_empty(), "nothing to back up, nothing changed");
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, newer);
     }
 
     #[test]

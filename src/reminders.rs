@@ -98,6 +98,20 @@ fn tick(cx: &mut App) {
     }
 }
 
+/// A plain notification with no buttons, for when Quiet cannot start and
+/// has no window to say why. Returns once it is handed to the system.
+pub fn show_message(summary: &str, body: &str) {
+    let mut notification = notify_rust::Notification::new();
+    notification.summary(summary).body(body);
+    #[cfg(windows)]
+    notification.app_id(APP_ID);
+    #[cfg(target_os = "linux")]
+    notification.appname("Quiet").icon("quiet");
+    if let Err(err) = notification.show() {
+        data::log_error(&anyhow::anyhow!("notification: {err}"));
+    }
+}
+
 /// Shows the notification on its own thread, which waits for a button
 /// press (or the notification closing) and reports back.
 fn show(id: TaskId, title: String, body: String, cx: &mut App) {

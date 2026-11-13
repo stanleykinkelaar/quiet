@@ -120,8 +120,15 @@ fn main() {
     let store = match Store::open(&db_path) {
         Ok(store) => store,
         Err(err) => {
-            // Release builds have no console, so this also goes to quiet.log.
+            // Release builds have no console and there is no window yet, so
+            // say it in a notification, and in quiet.log for the details.
+            let body = if err.downcast_ref::<quiet_store::NewerDatabase>().is_some() {
+                "Your list was saved by a newer version of Quiet. Run the install command again to get it back, then start Quiet. Your list is unchanged.".to_string()
+            } else {
+                format!("Quiet could not open your list: {err:#}. Details are in quiet.log next to it.")
+            };
             data::log_error(&err.context("could not open the database"));
+            reminders::show_message("Quiet did not start", &body);
             std::process::exit(1);
         }
     };
