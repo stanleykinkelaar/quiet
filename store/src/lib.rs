@@ -519,10 +519,23 @@ impl Store {
         Ok(count as usize)
     }
 
+    /// Open tasks in the Inbox and in active projects: the Inbox first,
+    /// then each project's tasks together, its next action first.
+    pub fn inbox_with_projects(&self) -> Result<Vec<Task>> {
+        self.query_tasks(
+            "WHERE status = 'open'
+               AND (project_id IS NULL OR project_id IN (SELECT id FROM projects WHERE archived = 0))
+             ORDER BY project_id IS NOT NULL, project_id, is_next_action DESC, created_at, id",
+            [],
+        )
+    }
+
     /// What planning the day offers, one at a time, in this order: tasks
-    /// whose day is within the coming week (soonest first), each active
-    /// project's next action, then the Inbox (never looked at first). Only
-    /// open tasks that are not in Today yet, each once.
+    /// whose day is within the coming week (soonest first), one task from
+    /// each active project, then the Inbox (never looked at first). A
+    /// project offers its next action, or without one its oldest task that
+    /// has no day and does not repeat. Only open tasks that are not in
+    /// Today yet, each once.
     pub fn plan_candidates(&self, today: NaiveDate) -> Result<Vec<Task>> {
         let soon = day_key(today + Duration::days(PLAN_DAYS_AHEAD));
         let mut tasks = self.query_tasks(
@@ -531,8 +544,15 @@ impl Store {
             params![day_key(today), soon],
         )?;
         tasks.extend(self.query_tasks(
-            "WHERE status = 'open' AND in_today = 0 AND is_next_action = 1
+            "WHERE status = 'open' AND in_today = 0
                AND project_id IN (SELECT id FROM projects WHERE archived = 0)
+               AND (is_next_action = 1 OR (
+                   NOT EXISTS (SELECT 1 FROM tasks n WHERE n.project_id = tasks.project_id
+                                 AND n.status = 'open' AND n.is_next_action = 1)
+                   AND id = (SELECT f.id FROM tasks f WHERE f.project_id = tasks.project_id
+                               AND f.status = 'open'
+                               AND f.day IS NULL AND f.repeat = ''
+                             ORDER BY f.created_at, f.id LIMIT 1)))
              ORDER BY created_at, id",
             [],
         )?);
@@ -1263,6 +1283,58 @@ mod tests {
 
         let titles: Vec<_> = s.plan_candidates(today).unwrap().into_iter().map(|t| t.title).collect();
         assert_eq!(titles, ["tuesday", "next with day", "saturday", "inbox new", "inbox seen"]);
+    }
+
+    #[test]
+    fn plan_offers_a_task_from_projects_without_a_next_action() {
+        let s = Store::open_in_memory().unwrap();
+        let today = day(MON);
+        let work = s.add_project("Work", "#5B8DEF").unwrap();
+        let later = s.add_task("for later", Some(work), false).unwrap();
+        let mut e = edit(&s, later);
+        e.day = Some(day("2026-12-01"));
+        s.update_task(later, &e, today).unwrap();
+        let daily = s.add_task("daily", Some(work), false).unwrap();
+        let mut e = edit(&s, daily);
+        e.repeat = Repeat::Daily;
+        s.update_task(daily, &e, today).unwrap();
+        s.set_in_today(daily, false).unwrap();
+        s.add_task("oldest plain", Some(work), false).unwrap();
+        s.add_task("newer plain", Some(work), false).unwrap();
+
+        let titles = |s: &Store| -> Vec<String> {
+            s.plan_candidates(today).unwrap().into_iter().map(|t| t.title).collect()
+        };
+        assert_eq!(titles(&s), ["oldest plain"], "no day, no repeat, oldest first");
+        let oldest = s.project_tasks(work).unwrap().into_iter().find(|t| t.title == "oldest plain").unwrap();
+        s.set_in_today(oldest.id, true).unwrap();
+        assert!(titles(&s).is_empty(), "one per project: its oldest is already in Today");
+        s.set_in_today(oldest.id, false).unwrap();
+
+        let next = s.add_task("chosen", Some(work), false).unwrap();
+        s.set_next_action(next, true).unwrap();
+        assert_eq!(titles(&s), ["chosen"], "a next action wins");
+
+        s.set_in_today(next, true).unwrap();
+        assert!(titles(&s).is_empty(), "the project is already in Today");
+    }
+
+    #[test]
+    fn inbox_with_projects_groups_by_project() {
+        let s = Store::open_in_memory().unwrap();
+        let home = s.add_project("Home", "#5B8DEF").unwrap();
+        let old = s.add_project("Old", "#5B8DEF").unwrap();
+        s.set_project_archived(old, true).unwrap();
+        s.add_task("home a", Some(home), false).unwrap();
+        s.add_task("loose", None, false).unwrap();
+        let next = s.add_task("home next", Some(home), false).unwrap();
+        s.set_next_action(next, true).unwrap();
+        s.add_task("archived", Some(old), false).unwrap();
+        let done = s.add_task("finished", None, false).unwrap();
+        s.complete(done, now()).unwrap();
+
+        let titles: Vec<_> = s.inbox_with_projects().unwrap().into_iter().map(|t| t.title).collect();
+        assert_eq!(titles, ["loose", "home next", "home a"]);
     }
 
     #[test]
