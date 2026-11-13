@@ -2,6 +2,7 @@
 name = "quiet-icons"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 publish = false
 description = "Writes Quiet's icon as PNGs for the macOS bundle and Linux icon theme"
 

@@ -5,6 +5,7 @@ members = ["store", "packaging/icons"]
 name = "quiet"
 version = "0.4.0"
 edition = "2024"
+license = "MIT"
 description = "A calm to-do app"
 publish = false
 
