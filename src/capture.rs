@@ -75,15 +75,30 @@ pub fn open(cx: &mut App) {
             ..options()
         };
         if let Ok(handle) = open_capture(overlay, cx) {
+            // The overlay asks for the keyboard itself (Exclusive above).
             cx.set_global(CaptureWindow(Some(handle)));
             return;
         }
     }
     let popup = WindowOptions { window_bounds: Some(WindowBounds::centered(bounds, cx)), ..options() };
     match open_capture(popup, cx) {
-        Ok(handle) => cx.set_global(CaptureWindow(Some(handle))),
+        Ok(handle) => {
+            cx.set_global(CaptureWindow(Some(handle)));
+            take_keyboard(handle, cx);
+        }
         Err(err) => data::log_error(&err),
     }
+}
+
+/// A new window does not get the keyboard by itself. Windows only lets the
+/// app that had the last input come to the front, and macOS does not
+/// activate a menu bar app on its own. Without this you have to click the
+/// field before you can type. Activating the window works around both:
+/// on Windows GPUI simulates a key press first, which is what lets it
+/// come to the front.
+fn take_keyboard(handle: AnyWindowHandle, cx: &mut App) {
+    cx.activate(true);
+    handle.update(cx, |_, window, _| window.activate_window()).ok();
 }
 
 fn open_capture(options: WindowOptions, cx: &mut App) -> anyhow::Result<AnyWindowHandle> {
