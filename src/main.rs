@@ -120,7 +120,8 @@ fn main() {
     let store = match Store::open(&db_path) {
         Ok(store) => store,
         Err(err) => {
-            eprintln!("quiet: could not open the database: {err:#}");
+            // Release builds have no console, so this also goes to quiet.log.
+            data::log_error(&err.context("could not open the database"));
             std::process::exit(1);
         }
     };

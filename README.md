@@ -90,6 +90,12 @@ How the day works:
 
 Your data lives in the place listed under Install. Set the environment variable `QUIET_DB` to a different path to try things without touching your real list.
 
+Your list is safe across updates:
+
+* Before an update changes the database, Quiet copies it into a `backups` folder next to `quiet.db` (for example `~/.local/share/quiet/backups`). The last three copies stay. If the copy cannot be made, Quiet does not touch the database and writes why to `quiet.log`.
+* Settings, Your data, Export tasks writes every task and project, done ones included, to a JSON file in your Downloads folder. It is for keeping your list somewhere else; Quiet does not read it back in.
+* To go back to a copy, quit Quiet, replace `quiet.db` with the copy (rename it to `quiet.db`) and start Quiet again.
+
 ## What you need to build it
 
 On Windows 10 or 11 (x64):

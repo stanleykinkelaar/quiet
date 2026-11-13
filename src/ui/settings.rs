@@ -118,6 +118,42 @@ impl MainView {
             .into_any_element()
     }
 
+    /// Exporting the list, and where the automatic copies are.
+    fn render_data(&self, cx: &mut Context<Self>) -> AnyElement {
+        let subtle = style::subtle(cx);
+        let backups = quiet_store::backup_dir(&data::database_path());
+        let has_backups = backups.is_dir();
+        v_flex()
+            .gap_3()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(Button::new("export").label("Export tasks").on_click(cx.listener(|this, _, _, cx| {
+                        this.export_note = Some(match data::export(cx) {
+                            Ok(path) => {
+                                cx.reveal_path(&path);
+                                format!("Saved to {}", path.display()).into()
+                            }
+                            Err(err) => {
+                                data::log_error(&err);
+                                format!("Could not export: {err:#}").into()
+                            }
+                        });
+                        cx.notify();
+                    })))
+                    .when(has_backups, |this| {
+                        this.child(
+                            Button::new("show-backups")
+                                .ghost()
+                                .label("Show backups")
+                                .on_click(move |_, _, cx| cx.open_with_system(&backups)),
+                        )
+                    }),
+            )
+            .children(self.export_note.clone().map(|note| div().text_sm().text_color(subtle).child(note)))
+            .into_any_element()
+    }
+
     pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let subtle = style::subtle(cx);
         let section = |title: &'static str, caption: SharedString, control: AnyElement| {
@@ -163,6 +199,16 @@ impl MainView {
                 }
                 .into(),
                 self.render_update(cx),
+            ))
+            .child(section(
+                "Your data",
+                format!(
+                    "Export writes every task and project, done ones too, to a JSON file in {}. Before an update changes your list, Quiet keeps a copy of it first. The last {} copies stay.",
+                    data::export_dir().display(),
+                    quiet_store::KEEP_BACKUPS
+                )
+                .into(),
+                self.render_data(cx),
             ))
             .when(!platform::notifications_enabled(), |this| {
                 this.child(section(

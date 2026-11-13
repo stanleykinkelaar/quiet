@@ -163,6 +163,8 @@ pub struct MainView {
     inbox_projects: bool,
     hotkey_input: Entity<InputState>,
     settings_note: Option<SharedString>,
+    /// Settings: where the last export went, or why it failed.
+    export_note: Option<SharedString>,
     autostart: bool,
     scroll: ScrollHandle,
     /// Set at the start of every render from the window width.
@@ -216,6 +218,7 @@ impl MainView {
             inbox_unsorted: 0,
             hotkey_input,
             settings_note: None,
+            export_note: None,
             autostart: crate::platform::autostart::is_enabled(),
             scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
