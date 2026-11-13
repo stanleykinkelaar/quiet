@@ -4,7 +4,7 @@
 //! (rollover, repeating tasks, reminders, "done today") takes the current
 //! date or time as a parameter so it can be tested without a clock.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
@@ -376,12 +376,90 @@ pub fn day_arrives(day: NaiveDate, lead_days: i64, today: NaiveDate) -> bool {
     day - Duration::days(lead_days.max(0)) <= today
 }
 
+/// The database was made by a newer Quiet, with a schema this version
+/// does not know. Opening it is refused, so nothing gets damaged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewerDatabase {
+    pub found: i64,
+    pub known: i64,
+}
+
+impl std::fmt::Display for NewerDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this list was saved by a newer version of Quiet (schema {}, this version knows up to {})",
+            self.found, self.known
+        )
+    }
+}
+
+impl std::error::Error for NewerDatabase {}
+
+/// How many copies from before a database change are kept.
+pub const KEEP_BACKUPS: usize = 3;
+
+/// Where copies of the database from before a change are kept: a
+/// `backups` folder next to it.
+pub fn backup_dir(db_path: &Path) -> PathBuf {
+    db_path.with_file_name("backups")
+}
+
+/// Copies the database as it is now into `backup_dir`, named after the
+/// moment and its schema version, then removes all but the newest
+/// `KEEP_BACKUPS`. Returns the copy's path.
+fn backup(conn: &Connection, db_path: &Path, version: i64, at: NaiveDateTime) -> Result<PathBuf> {
+    let dir = backup_dir(db_path);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let stem = db_path.file_stem().and_then(|s| s.to_str()).unwrap_or("quiet");
+    let target = dir.join(format!("{stem}-{}-schema{version}.db", at.format("%Y%m%d-%H%M%S")));
+    // VACUUM INTO writes one consistent file, WAL included, and refuses to
+    // overwrite an existing one.
+    conn.execute("VACUUM INTO ?1", [target.to_string_lossy()])
+        .with_context(|| format!("backing up to {}", target.display()))?;
+
+    let prefix = format!("{stem}-");
+    let mut copies: Vec<PathBuf> = std::fs::read_dir(&dir)?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix) && n.ends_with(".db"))
+        })
+        .collect();
+    // The names start with the moment, so sorting by name sorts by age.
+    copies.sort();
+    let surplus = copies.len().saturating_sub(KEEP_BACKUPS);
+    for old in &copies[..surplus] {
+        std::fs::remove_file(old).ok();
+    }
+    Ok(target)
+}
+
+fn check_not_newer(version: i64) -> Result<()> {
+    let known = MIGRATIONS.len() as i64;
+    if version > known {
+        return Err(NewerDatabase { found: version, known }.into());
+    }
+    Ok(())
+}
+
 impl Store {
+    /// Opens (or creates) the database at `path`. Before an existing
+    /// database is changed to a newer schema, a copy of it goes into
+    /// `backup_dir`. If that copy cannot be made, nothing is changed and
+    /// this fails. A database from a newer Quiet fails with
+    /// `NewerDatabase`, untouched.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        check_not_newer(version)?;
+        if version > 0 && (version as usize) < MIGRATIONS.len() {
+            backup(&conn, path, version, Local::now().naive_local())?;
+        }
         Self::init(conn)
     }
 
@@ -399,6 +477,7 @@ impl Store {
 
     fn migrate(&self) -> Result<()> {
         let version: i64 = self.conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        check_not_newer(version)?;
         for (index, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
             let tx = self.conn.unchecked_transaction()?;
             tx.execute_batch(sql)?;
@@ -939,6 +1018,56 @@ impl Store {
         Ok(())
     }
 
+    // ---- export ---------------------------------------------------------
+
+    /// Every project and task, done ones included, as readable JSON. Meant
+    /// for keeping your list somewhere else, not for reading back in.
+    pub fn export_json(&self, exported_at: NaiveDateTime) -> Result<String> {
+        let projects: Vec<serde_json::Value> = self
+            .projects(true)?
+            .into_iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "color": p.color,
+                    "archived": p.archived,
+                })
+            })
+            .collect();
+        let moment = |t: i64| {
+            DateTime::from_timestamp(t, 0).map(|t| t.with_timezone(&Local).format("%Y-%m-%dT%H:%M:%S").to_string())
+        };
+        let tasks: Vec<serde_json::Value> = self
+            .query_tasks("ORDER BY created_at, id", [])?
+            .into_iter()
+            .map(|t| {
+                serde_json::json!({
+                    "id": t.id,
+                    "title": t.title,
+                    "note": t.note,
+                    "project_id": t.project_id,
+                    "done": t.is_done(),
+                    "in_today": t.in_today,
+                    "next_action": t.is_next_action,
+                    "repeat": t.repeat.label(),
+                    "reminder": t.reminder.map(|r| r.format("%H:%M").to_string()),
+                    "day": t.day.map(day_key),
+                    "created": moment(t.created_at),
+                    "completed": t.completed_at.and_then(moment),
+                })
+            })
+            .collect();
+        let export = serde_json::json!({
+            "app": "Quiet",
+            "format": 1,
+            "exported": exported_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "projects": projects,
+            "tasks": tasks,
+        });
+        Ok(serde_json::to_string_pretty(&export)?)
+    }
+
     // ---- projects -------------------------------------------------------
 
     pub fn projects(&self, include_archived: bool) -> Result<Vec<Project>> {
@@ -1434,6 +1563,182 @@ mod tests {
         for r in [Repeat::Never, Repeat::Daily, Repeat::Weekdays, Repeat::Weekly(Weekday::Sun), Repeat::Weekly(Weekday::Mon)] {
             assert_eq!(Repeat::from_db(&r.to_db()), r);
         }
+    }
+
+    /// A fresh folder in the system temp dir, removed when dropped.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let dir = std::env::temp_dir().join(format!("quiet-{name}-{}-{nanos}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn backups_of(path: &Path) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(backup_dir(path))
+            .map(|entries| entries.filter_map(|e| e.ok().map(|e| e.path())).collect())
+            .unwrap_or_default();
+        found.sort();
+        found
+    }
+
+    /// Builds a database the way an older Quiet left it: only the first
+    /// `version` migrations, with a project and a few tasks in it.
+    fn old_database(path: &Path, version: usize) {
+        let conn = Connection::open(path).unwrap();
+        for sql in &MIGRATIONS[..version] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", version as i64).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects (id, name, color, created_at) VALUES (1, 'Home', '#5B8DEF', 100);
+             INSERT INTO tasks (title, project_id, in_today, is_next_action, repeat, reminder, created_at)
+                 VALUES ('fix the tap', 1, 1, 1, 'weekly:5', '09:30', 200);
+             INSERT INTO tasks (title, note, created_at) VALUES ('call mum', 'about sunday', 300);
+             INSERT INTO tasks (title, status, created_at, completed_at) VALUES ('old win', 'done', 50, 60);
+             INSERT INTO settings (key, value) VALUES ('hotkey', 'Ctrl+Alt+Q');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn every_old_schema_upgrades_and_is_backed_up_first() {
+        for version in 1..MIGRATIONS.len() {
+            let dir = TempDir::new("upgrade");
+            let path = dir.0.join("quiet.db");
+            old_database(&path, version);
+
+            let s = Store::open(&path).unwrap();
+            let fix = s.today().unwrap().into_iter().next().unwrap_or_else(|| panic!("schema {version}: Today task lost"));
+            assert_eq!(fix.title, "fix the tap");
+            assert_eq!(fix.project_id, Some(1));
+            assert!(fix.is_next_action);
+            assert_eq!(fix.repeat, Repeat::Weekly(Weekday::Fri));
+            assert_eq!(fix.reminder, Some(time("09:30")));
+            let inbox = s.inbox().unwrap();
+            assert_eq!(inbox.len(), 1, "schema {version}");
+            assert_eq!(inbox[0].note.as_deref(), Some("about sunday"));
+            assert_eq!(s.query_tasks("WHERE status = 'done'", []).unwrap().len(), 1);
+            assert_eq!(s.project(1).unwrap().unwrap().name, "Home");
+            assert_eq!(s.setting("hotkey").unwrap().as_deref(), Some("Ctrl+Alt+Q"));
+            drop(s);
+
+            // The copy is the database exactly as it was before.
+            let copies = backups_of(&path);
+            assert_eq!(copies.len(), 1, "schema {version}: one backup");
+            let name = copies[0].file_name().unwrap().to_str().unwrap().to_string();
+            assert!(name.starts_with("quiet-") && name.ends_with(&format!("-schema{version}.db")), "{name}");
+            let copy = Connection::open(&copies[0]).unwrap();
+            let copy_version: i64 = copy.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+            assert_eq!(copy_version, version as i64);
+            let count: i64 = copy.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
+            assert_eq!(count, 3);
+
+            // Opening again changes nothing, so no new copy.
+            drop(Store::open(&path).unwrap());
+            assert_eq!(backups_of(&path).len(), 1);
+        }
+    }
+
+    #[test]
+    fn no_backup_means_no_upgrade() {
+        let dir = TempDir::new("blocked");
+        let path = dir.0.join("quiet.db");
+        old_database(&path, 1);
+        // A file where the backups folder should be: the copy cannot be made.
+        std::fs::write(backup_dir(&path), "in the way").unwrap();
+
+        assert!(Store::open(&path).is_err());
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, 1, "left as it was");
+    }
+
+    #[test]
+    fn a_database_from_a_newer_quiet_is_left_alone() {
+        let dir = TempDir::new("newer");
+        let path = dir.0.join("quiet.db");
+        drop(Store::open(&path).unwrap());
+        let newer = MIGRATIONS.len() as i64 + 1;
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE from_the_future (x INTEGER)").unwrap();
+            conn.pragma_update(None, "user_version", newer).unwrap();
+        }
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let err = Store::open(&path).err().expect("refused");
+        let found = err.downcast_ref::<NewerDatabase>().expect("a NewerDatabase error");
+        assert_eq!(*found, NewerDatabase { found: newer, known: MIGRATIONS.len() as i64 });
+        assert!(backups_of(&path).is_empty(), "nothing to back up, nothing changed");
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, newer);
+    }
+
+    #[test]
+    fn a_new_database_needs_no_backup() {
+        let dir = TempDir::new("fresh");
+        let path = dir.0.join("quiet.db");
+        drop(Store::open(&path).unwrap());
+        drop(Store::open(&path).unwrap());
+        assert!(backups_of(&path).is_empty());
+    }
+
+    #[test]
+    fn only_the_newest_backups_are_kept() {
+        let dir = TempDir::new("keep");
+        let path = dir.0.join("quiet.db");
+        let s = Store::open(&path).unwrap();
+        // Something else's file in the folder is left alone.
+        std::fs::create_dir_all(backup_dir(&path)).unwrap();
+        std::fs::write(backup_dir(&path).join("notes.txt"), "mine").unwrap();
+        for minute in ["10:01", "10:02", "10:03", "10:04", "10:05"] {
+            backup(&s.conn, &path, 1, at(MON, minute)).unwrap();
+        }
+        let names: Vec<String> =
+            backups_of(&path).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            names,
+            [
+                "notes.txt",
+                "quiet-20261109-100300-schema1.db",
+                "quiet-20261109-100400-schema1.db",
+                "quiet-20261109-100500-schema1.db",
+            ]
+        );
+    }
+
+    #[test]
+    fn export_lists_everything() {
+        let s = Store::open_in_memory().unwrap();
+        let p = s.add_project("Home", "#5B8DEF").unwrap();
+        let a = s.add_task("fix \"the\" tap", Some(p), true).unwrap();
+        s.add_task("call mum", None, false).unwrap();
+        s.complete(a, day_start(day(MON)) + 3600).unwrap();
+
+        let json: serde_json::Value =
+            serde_json::from_str(&s.export_json(at(MON, "12:00")).unwrap()).unwrap();
+        assert_eq!(json["format"], 1);
+        assert_eq!(json["exported"], "2026-11-09T12:00:00");
+        assert_eq!(json["projects"][0]["name"], "Home");
+        let tasks = json["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 2);
+        let tap = tasks.iter().find(|t| t["done"] == true).unwrap();
+        assert_eq!(tap["title"], "fix \"the\" tap");
+        assert_eq!(tap["project_id"], p);
+        assert_eq!(tap["completed"], "2026-11-09T01:00:00");
+        assert_eq!(tasks.iter().find(|t| t["done"] == false).unwrap()["title"], "call mum");
     }
 
     #[test]

@@ -57,6 +57,25 @@ pub fn log_error(err: &anyhow::Error) {
     }
 }
 
+/// Where an export goes: the Downloads folder, or home without one.
+pub fn export_dir() -> PathBuf {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let downloads = home.join("Downloads");
+    if downloads.is_dir() { downloads } else { home }
+}
+
+/// Writes every project and task to a JSON file in `export_dir` and
+/// returns its path.
+pub fn export(cx: &App) -> anyhow::Result<PathBuf> {
+    let now = Local::now().naive_local();
+    let json = store(cx).export_json(now)?;
+    let path = export_dir().join(format!("quiet-export-{}.json", now.format("%Y-%m-%d-%H%M%S")));
+    std::fs::write(&path, json).map_err(|err| anyhow::anyhow!("writing {}: {err}", path.display()))?;
+    Ok(path)
+}
+
 pub fn today() -> NaiveDate {
     Local::now().date_naive()
 }

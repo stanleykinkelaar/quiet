@@ -5448,6 +5448,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "rusqlite",
+ "serde_json",
 ]
 
 [[package]]
