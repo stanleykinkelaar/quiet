@@ -69,6 +69,7 @@ The Linux build is x86_64 only for now. It needs Wayland or X11 with Vulkan driv
 | K | Keep a task from an earlier day in Today |
 | P | Plan today, one question at a time (on Today) |
 | S | Sort the Inbox, one task at a time (on Today and Inbox) |
+| F | Show project tasks in the Inbox too, or hide them again |
 | Delete | Delete the task (an Undo note appears) |
 | Up, Down | Move the selection |
 | Alt+Up, Alt+Down | Reorder Today (dragging works too) |
@@ -77,12 +78,13 @@ The Linux build is x86_64 only for now. It needs Wayland or X11 with Vulkan driv
 How the day works:
 
 * Today is yours to fill. Past five tasks you get a gentle note, nothing more.
-* Plan today (P, or the line at the top of Today until you have) walks you through it one question at a time. First the tasks left from earlier days: keep or not today. Then what you could do: tasks with a day in the coming week, each project's next action, then the Inbox. Today, not today, or already done. At five it stops and says the day is full; S stops sooner. Last, you pick what to start with.
+* Plan today (P, or the line at the top of Today until you have) walks you through it one question at a time. First the tasks left from earlier days: keep or not today. Then what you could do: tasks with a day in the coming week, one task from each project (its next action, or else the one waiting longest), then the Inbox. Today, not today, or already done. At five it stops and says the day is full; S stops sooner. Last, you pick what to start with.
 * The first task in Today is marked Now, so starting needs no decision. Finish it and the next one moves up. Reorder with Alt+Up and Alt+Down to change what comes first.
 * Unfinished Today tasks stay overnight, under "From earlier". Keep them (K, or Keep all) or send them back to their project or the Inbox (T, or Send all back). Skipping a morning loses nothing. Nothing turns red and nothing is counted.
 * Repeating tasks (every day, every weekday, or weekly on one day) come into Today on their days.
 * A task can have a day (type fri, tomorrow, +3 or 14 nov). It comes into Today on that day, or up to a week before if you choose. Sent back, it does not keep returning. After the day it simply stays, never red.
 * A reminder is a time of day, on days the task is in Today. The notification has In 10 min, In 1 hour and Done buttons. If nobody reacts, it rings once more 10 minutes later. A reminder you missed (the PC was off, or you ignored it) shows as a marked bell on the task until you click it or finish the task. Setting a reminder puts the task in Today.
+* The Inbox can show the tasks of your projects too (F, or the Projects button). Each carries its project's tag, so T picks it for today and A makes it the project's next action without opening the project. Quiet remembers the choice; Sort still only asks about real Inbox tasks.
 * Sort (S) shows Inbox tasks one at a time: Today, keep in Inbox, a project (1 to 9), already done, or delete. When ten or more are waiting, Today offers it in one quiet line.
 * Closing the window keeps Quiet in the tray (the menu bar on macOS). Use the tray menu's Quit, or Ctrl+Q, to really quit.
 

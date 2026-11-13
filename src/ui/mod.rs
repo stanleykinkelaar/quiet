@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use chrono::Datelike as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use quiet_store::{Project, ProjectId, Task, TaskId};
@@ -46,6 +46,7 @@ actions!(
         KeepTask,
         SortInbox,
         PlanToday,
+        ToggleInboxProjects,
     ]
 );
 
@@ -54,6 +55,8 @@ const CONTEXT: &str = "Quiet";
 const TODAY_SOFT_LIMIT: usize = 5;
 /// Past this many unsorted Inbox tasks, Today offers one line to sort them.
 const INBOX_NUDGE: usize = 10;
+/// Setting: the Inbox also lists the tasks of active projects.
+const INBOX_PROJECTS_KEY: &str = "inbox_show_projects";
 
 pub fn bind_keys(cx: &mut App) {
     // Single keys only act when no text field has focus.
@@ -68,6 +71,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("k", KeepTask, list),
         KeyBinding::new("s", SortInbox, list),
         KeyBinding::new("p", PlanToday, list),
+        KeyBinding::new("f", ToggleInboxProjects, list),
         KeyBinding::new("delete", DeleteTask, list),
         KeyBinding::new("down", SelectNext, list),
         KeyBinding::new("up", SelectPrev, list),
@@ -155,6 +159,8 @@ pub struct MainView {
     inbox_unsorted: usize,
     /// Whether today has been planned, so Today stops offering it.
     planned_today: bool,
+    /// The Inbox also lists project tasks, each with its project's tag.
+    inbox_projects: bool,
     hotkey_input: Entity<InputState>,
     settings_note: Option<SharedString>,
     autostart: bool,
@@ -204,6 +210,7 @@ impl MainView {
             project_next: HashMap::new(),
             show_archived: false,
             planned_today: true,
+            inbox_projects: data::read(cx, |s| s.setting(INBOX_PROJECTS_KEY)).as_deref() == Some("1"),
             layout: Layout::Regular,
             select_project: None,
             inbox_unsorted: 0,
@@ -251,6 +258,7 @@ impl MainView {
             data::read(cx, |s| s.projects(true)).into_iter().map(|p| (p.id, p)).collect();
         self.open = match self.screen {
             Screen::Today => data::read(cx, |s| s.today()),
+            Screen::Inbox if self.inbox_projects => data::read(cx, |s| s.inbox_with_projects()),
             Screen::Inbox => data::read(cx, |s| s.inbox()),
             Screen::Project(id) => data::read(cx, |s| s.project_tasks(id)),
             Screen::Done => {
@@ -429,6 +437,15 @@ impl MainView {
         }
     }
 
+    fn on_toggle_inbox_projects(&mut self, _: &ToggleInboxProjects, _: &mut Window, cx: &mut Context<Self>) {
+        if self.screen != Screen::Inbox {
+            return;
+        }
+        self.inbox_projects = !self.inbox_projects;
+        let value = if self.inbox_projects { "1" } else { "0" };
+        data::change(cx, |s| s.set_setting(INBOX_PROJECTS_KEY, value));
+    }
+
     fn on_delete(&mut self, _: &DeleteTask, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = self.selected {
             delete_task(id, window, cx);
@@ -540,10 +557,14 @@ impl MainView {
                         .into(),
                 ))
             }
-            Screen::Inbox => v_flex()
-                .gap_1()
-                .child(heading("Inbox".into()))
-                .child(caption("Everything you captured. Press T to pick it for today.".into())),
+            Screen::Inbox => v_flex().gap_1().child(heading("Inbox".into())).child(caption(
+                if self.inbox_projects {
+                    "Everything open, projects included. Press T to pick it for today."
+                } else {
+                    "Everything you captured. Press T to pick it for today."
+                }
+                .into(),
+            )),
             Screen::Projects => v_flex()
                 .gap_1()
                 .child(heading("Projects".into()))
@@ -603,14 +624,36 @@ impl MainView {
                     )
                     .into_any_element(),
             ),
-            Screen::Inbox if !self.open.iter().all(|t| t.in_today) => Some(
-                Button::new("sort-inbox")
-                    .ghost()
-                    .small()
-                    .icon(IconName::Inbox)
-                    .label("Sort")
-                    .tooltip("Decide on each task, one at a time (S)")
-                    .on_click(cx.listener(|_, _, window, cx| sort::open(window, cx)))
+            Screen::Inbox => Some(
+                h_flex()
+                    .gap_1()
+                    .when(self.open.iter().any(|t| t.project_id.is_none() && !t.in_today), |this| {
+                        this.child(
+                            Button::new("sort-inbox")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Inbox)
+                                .label("Sort")
+                                .tooltip("Decide on each task, one at a time (S)")
+                                .on_click(cx.listener(|_, _, window, cx| sort::open(window, cx))),
+                        )
+                    })
+                    .child(
+                        Button::new("inbox-projects")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Folder)
+                            .label("Projects")
+                            .selected(self.inbox_projects)
+                            .tooltip(if self.inbox_projects {
+                                "Hide project tasks (F)"
+                            } else {
+                                "Show project tasks here too (F)"
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.on_toggle_inbox_projects(&ToggleInboxProjects, window, cx)
+                            })),
+                    )
                     .into_any_element(),
             ),
             Screen::Project(id) => Some(
@@ -719,8 +762,9 @@ impl MainView {
                 }))
         });
 
-        // A small coloured tag naming the project, on Today only.
-        let tag = matches!(self.screen, Screen::Today | Screen::Done)
+        // A small coloured tag naming the project, wherever tasks of several
+        // projects mix.
+        let tag = matches!(self.screen, Screen::Today | Screen::Done | Screen::Inbox)
             .then(|| task.project_id.and_then(|p| self.project_map.get(&p)))
             .flatten()
             .map(|project| {
@@ -896,6 +940,21 @@ impl MainView {
             if first_carried {
                 rows.push(self.render_carried_header(cx));
             }
+            let first_in_project = self.screen == Screen::Inbox
+                && task.project_id.is_some()
+                && !self.open[..index].iter().any(|t| t.project_id.is_some());
+            if first_in_project {
+                rows.push(
+                    div()
+                        .pt_6()
+                        .pb_1()
+                        .px_3()
+                        .text_sm()
+                        .text_color(style::subtle(cx))
+                        .child("In projects. T picks one for today, A makes it the next action.")
+                        .into_any_element(),
+                );
+            }
             rows.push(self.render_row(task, index, cx));
         }
         let empty = self.open.is_empty();
@@ -1065,6 +1124,7 @@ impl Render for MainView {
             .on_action(cx.listener(Self::on_keep))
             .on_action(cx.listener(Self::on_sort_inbox))
             .on_action(cx.listener(Self::on_plan_today))
+            .on_action(cx.listener(Self::on_toggle_inbox_projects))
             .on_action(cx.listener(|this, _: &ShowToday, window, cx| this.show(Screen::Today, window, cx)))
             .on_action(cx.listener(|this, _: &ShowInbox, window, cx| this.show(Screen::Inbox, window, cx)))
             .on_action(cx.listener(|this, _: &ShowProjects, window, cx| this.show(Screen::Projects, window, cx)))
@@ -1099,7 +1159,7 @@ impl MainView {
                 &[("P", "plan"), ("N", "new"), ("Space", "done"), ("K", "keep"), ("T", "take out")]
             }
             Screen::Today => &[("P", "plan"), ("N", "new"), ("Space", "done"), ("T", "take out"), ("Alt ↑↓", "move")],
-            Screen::Inbox => &[("N", "new"), ("Enter", "edit"), ("Space", "done"), ("T", "today"), ("S", "sort")],
+            Screen::Inbox => &[("N", "new"), ("Space", "done"), ("T", "today"), ("S", "sort"), ("F", "projects")],
             Screen::Projects => &[("N", "new project"), ("Enter", "open"), ("E", "edit")],
             Screen::Project(_) => &[("N", "new"), ("Space", "done"), ("T", "today"), ("A", "next action"), ("Esc", "back")],
             Screen::Done => &[("Space", "not done after all")],

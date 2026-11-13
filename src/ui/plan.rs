@@ -1,6 +1,6 @@
 //! Planning the day: one guided pass, one question at a time. First the
 //! tasks left from earlier days, then what could be done today (tasks with
-//! a day coming up, each project's next action, the Inbox), until the day
+//! a day coming up, one task per project, the Inbox), until the day
 //! is full enough. Last, what to start with.
 
 use std::collections::HashMap;
@@ -210,7 +210,8 @@ impl Planner {
                     _ => format!("For {chip}"),
                 }
             }
-            (_, None, Some(project)) => format!("Next action in {}", project.name),
+            (_, None, Some(project)) if task.is_next_action => format!("Next action in {}", project.name),
+            (_, None, Some(project)) => format!("Waiting longest in {}", project.name),
             (_, None, None) => "From your Inbox".into(),
         }
     }
