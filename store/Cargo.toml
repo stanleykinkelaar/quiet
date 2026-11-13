@@ -2,6 +2,7 @@
 name = "quiet-store"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 publish = false
 description = "Storage for Quiet: tasks, projects and settings in SQLite"
 
