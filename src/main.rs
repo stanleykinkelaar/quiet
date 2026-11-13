@@ -96,7 +96,7 @@ fn start_system(cx: &mut App, requests: async_channel::Receiver<Request>) {
         while let Ok(event) = rx.recv().await {
             cx.update(|cx| match event {
                 system::SystemEvent::Open => open_main(cx),
-                system::SystemEvent::QuickCapture => capture::open(cx),
+                system::SystemEvent::QuickCapture => capture::toggle(cx),
                 system::SystemEvent::Quit => cx.quit(),
             });
         }

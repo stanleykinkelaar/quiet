@@ -70,7 +70,9 @@ Closing the window keeps Quiet in the tray (the menu bar on macOS). Use the tray
 
 ### Quick capture
 
-Press Ctrl+Alt+Space anywhere. A small window with one text field appears. Type, press Enter, and the task lands in your Inbox and the window closes. Esc closes it without saving. You can change the shortcut in Settings (on Linux, see above).
+Press Ctrl+Alt+Space anywhere. A small window with one text field appears. Type, press Enter, and the task lands in your Inbox and the window closes. You can change the shortcut in Settings (on Linux, see above).
+
+Changed your mind? Press Esc to close it and throw the text away. Click anywhere else, or press the shortcut again, to close it and keep what you typed: it is back in the field the next time you open it. If clicking elsewhere does not close it (on Omarchy and other Hyprland setups quick capture can keep the keyboard), the shortcut always works.
 
 ## How the day works
 
@@ -115,7 +117,7 @@ Open a task with Enter to give it any of these.
 
 | Key | What it does |
 | --- | --- |
-| Ctrl+Alt+Space | Quick capture from anywhere (changeable in Settings) |
+| Ctrl+Alt+Space | Quick capture from anywhere, or close it again (changeable in Settings) |
 | 1, 2, 3, 4 | Today, Inbox, Projects, Done |
 | Ctrl+, (Cmd+, on macOS) | Settings |
 | Ctrl+Q (Cmd+Q on macOS) | Quit (closing the window only hides it) |
